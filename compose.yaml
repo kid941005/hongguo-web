@@ -1,0 +1,26 @@
+services:
+  hongguo-web:
+    build: .
+    image: hongguo-web:latest
+    container_name: hongguo-web
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      DATA_DIR: /app/data
+      # TOKEN: "改成你的口令"   # 可选：设置后所有 /api 请求需带 Authorization: Bearer <TOKEN>
+    volumes:
+      - hongguo-data:/app/data
+    restart: unless-stopped
+    # 安全加固：容器内无需写入除 /app/data 外的路径
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  hongguo-data:

@@ -1,0 +1,6 @@
+node_modules/
+data/
+.dsh-project-memory/
+.tmp/
+*.log
+.DS_Store

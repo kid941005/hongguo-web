@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>红果短剧 · 网页版</title>
+<link rel="stylesheet" href="/style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8D%92%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand" id="brand">🍒 <span>红果短剧</span></div>
+  <div class="searchbox">
+    <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
+    <button id="btnSearch" class="btn">搜索</button>
+  </div>
+  <div class="right">
+    <select id="sourceSelect" class="select" title="切换数据源"></select>
+    <button id="btnImport" class="btn ghost" title="导入糖葫芦风格 JS 源">＋源</button>
+    <button id="btnManage" class="btn ghost" title="源管理：启用 / 日志 / 删除">⚙ 源</button>
+    <button id="btnHistory" class="btn ghost" title="观看历史">🕘 历史</button>
+  </div>
+</header>
+
+<main id="main">
+  <div id="chips" class="chips"></div>
+  <div id="notice" class="notice hidden"></div>
+  <div id="grid" class="grid"></div>
+  <div class="morebar"><button id="btnMore" class="btn ghost hidden">加载更多</button></div>
+  <div id="empty" class="empty hidden"></div>
+</main>
+
+<section id="detail" class="detail hidden">
+  <button id="btnBack" class="btn ghost back">← 返回</button>
+  <div class="detail-head">
+    <img id="dCover" class="dcover" alt="" />
+    <div class="dinfo">
+      <h2 id="dTitle"></h2>
+      <div id="dMeta" class="dmeta"></div>
+      <p id="dDesc" class="ddesc"></p>
+    </div>
+  </div>
+  <div id="dResume" class="resume hidden"></div>
+  <div id="dLines" class="lines"></div>
+  <h3 class="ep-head">选集</h3>
+  <div id="dEps" class="eps"></div>
+</section>
+
+<div id="player" class="player hidden">
+  <div class="player-inner">
+    <div class="player-bar">
+      <span id="pTitle" class="ptitle"></span>
+      <div class="pactions">
+        <button id="btnRate" class="btn ghost" title="播放倍速（快捷键 , 减速 / . 加速）">1.0×</button>
+        <button id="btnQuality" class="btn ghost hidden" title="清晰度（仅 HLS 多码率源可用）">自动</button>
+        <button id="btnFull" class="btn ghost" title="全屏（快捷键 F）">全屏</button>
+        <button id="btnNext" class="btn ghost" title="下一集（快捷键 N）">下一集</button>
+        <button id="btnClosePlayer" class="btn ghost" title="关闭播放器（快捷键 Esc 退出全屏）">关闭 ✕</button>
+      </div>
+    </div>
+    <video id="video" controls playsinline preload="metadata"></video>
+    <div class="phint">空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · M 静音 · F 全屏 · , / . 倍速 · N 下一集</div>
+  </div>
+</div>
+
+<div id="importModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>导入数据源（糖葫芦 / CatPawOpen 风格）</h3>
+    <p class="hint">粘贴单个 .js 源码，或填写可直链下载的 URL。脚本需含 spider 对象与 id/name 元信息，接口约定与糖葫芦一致（home / category / detail / search / play）。</p>
+    <label class="lbl">源地址 URL（可选）</label>
+    <input id="impUrl" class="input" placeholder="https://…/xxx.js" />
+    <label class="lbl">源源码（URL 为空时使用）</label>
+    <textarea id="impCode" class="input code" rows="10" placeholder="var spider = { id: '...', name: '...', ... }"></textarea>
+    <div class="modal-actions">
+      <button id="btnImpCancel" class="btn ghost">取消</button>
+      <button id="btnImpOk" class="btn">导入</button>
+    </div>
+    <div id="impMsg" class="impmsg"></div>
+  </div>
+</div>
+
+<div id="manageModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>数据源管理</h3>
+    <p class="hint">内置源随镜像发布，不可删除；导入的 JS 源存放在数据卷 <code>/app/data/sources</code> 里，重建容器不丢。</p>
+    <div id="srcList" class="srclist"></div>
+    <div class="modal-actions">
+      <button id="btnManageClose" class="btn ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="histModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>观看历史</h3>
+    <p class="hint">保存在本浏览器（localStorage），不上传服务器。点条目即可从上次的位置续播。</p>
+    <div id="histList" class="histlist"></div>
+    <div class="modal-actions">
+      <button id="btnHistClear" class="btn ghost danger">清空历史</button>
+      <button id="btnHistClose" class="btn ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/vendor/hls.light.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

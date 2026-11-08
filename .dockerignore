@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+data
+server/.dsh-project-memory
+**/__probe_*
+**/__test_*
+*.log
+.tmp
+.git
+.gitignore
+Dockerfile
+compose.yaml
+README.md
