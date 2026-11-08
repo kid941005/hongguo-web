@@ -1,5 +1,8 @@
 # hongguo-web · 网页版红果短剧（Docker 部署）
 
+[![docker](https://github.com/kid941005/hongguo-web/actions/workflows/docker.yml/badge.svg)](https://github.com/kid941005/hongguo-web/actions/workflows/docker.yml)
+[![license](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
+
 一个可自托管的短剧网页播放器：自带「红果短剧」内置源（服务端解密直链播放，无需客户端），并预留与**糖葫芦（THLRedGuo / CatPaw）同款格式的 JS 源**接口——把单文件 `spider` 源丢进来即可多源聚合。
 
 - 前端：原生 JS 单页（暗色响应式），HLS 由内置 hls.js 播放，MP4 直连
@@ -31,6 +34,17 @@ docker compose up -d --build # 重新构建
 docker build -t hongguo-web .
 docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data hongguo-web
 ```
+
+### 直接用现成镜像（GHCR）
+
+打 tag 时 CI 会自动构建多架构镜像（linux/amd64 + linux/arm64）：
+
+```bash
+docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
+  ghcr.io/kid941005/hongguo-web:latest
+```
+
+若拉取提示无权限（包默认私有），在仓库的 Package 设置里把可见性改成 Public，或先 `docker login ghcr.io`。
 
 ## 2. 环境变量
 
@@ -82,6 +96,9 @@ docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data hongguo-
 ```
 hongguo-web/
 ├─ Dockerfile / compose.yaml / .dockerignore
+├─ LICENSE                 # GPL-3.0 全文
+├─ .github/workflows/      # CI：打 tag 构建并推送 GHCR 镜像
+├─ docs/                   # research.md（上游调研）+ screenshots/
 ├─ server/
 │  ├─ index.mjs            # 入口：装配 provider + 源管理 + 目录 + HTTP
 │  ├─ provider.mjs         # 内置红果：home/search/detail/stream（服务端分块解密）
@@ -169,7 +186,16 @@ var spider = {
 - **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
 - 仅供个人学习与自用；内容版权归各平台所有，请勿用于商业分发。
 
-## 8. 许可
+## 8. 截图
 
-- 本项目代码：GPL-3.0-only。
+首页与播放器（全屏）：
+
+| 首页 | 全屏播放 |
+| --- | --- |
+| ![首页](docs/screenshots/home.png) | ![全屏](docs/screenshots/fullscreen.png) |
+
+## 9. 许可
+
+- 本项目代码：[GPL-3.0-only](LICENSE)。
 - `server/vendor/hongguo.cjs` 派生自 [drpys](https://github.com/drpys) 的实现，遵循 GPL，详见 `server/vendor/LICENSE.drpys`、`LICENSE.template-tv`、`NOTICE.md`。
+- 上游调研与可行性验证过程见 [docs/research.md](docs/research.md)。
