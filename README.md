@@ -37,7 +37,15 @@ docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data hongguo-
 
 ### 直接用现成镜像（GHCR）
 
-打 tag 时 CI 会自动构建多架构镜像（linux/amd64 + linux/arm64）：
+仓库自带镜像构建工作流 [ci/docker.yml](ci/docker.yml)（打 tag 构建 linux/amd64 + linux/arm64 并推 GHCR，main 推 `:edge`）。
+
+> 该文件需要放到 `.github/workflows/` 才会生效；GitHub 要求推送工作流文件的 token 具备 `workflow` scope，首次请执行：
+> ```bash
+> gh auth refresh -h github.com -s workflow
+> mkdir -p .github/workflows && git mv ci/docker.yml .github/workflows/docker.yml && git commit -m "ci: enable docker workflow" && git push
+> ```
+
+镜像发布后：
 
 ```bash
 docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
@@ -97,7 +105,7 @@ docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
 hongguo-web/
 ├─ Dockerfile / compose.yaml / .dockerignore
 ├─ LICENSE                 # GPL-3.0 全文
-├─ .github/workflows/      # CI：打 tag 构建并推送 GHCR 镜像
+├─ ci/docker.yml           # 镜像构建工作流（放到 .github/workflows/ 生效）
 ├─ docs/                   # research.md（上游调研）+ screenshots/
 ├─ server/
 │  ├─ index.mjs            # 入口：装配 provider + 源管理 + 目录 + HTTP
