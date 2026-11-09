@@ -24,6 +24,13 @@ const SITE = 'https://hongguoduanju.com';
 const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
 const APP_SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+// 2026-11 起 multi_video_model 只认「平台匿名注册」的设备身份，且播放需用 71532 播放器 UA + signature branch 0
+const PLAYBACK_UA = 'com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)';
+const PLAYBACK_HOST = 'api5-normal-sinfonlineb.fqnovel.com';
+const PLAYBACK_HOST_ALT = 'api5-normal-hl.fqnovel.com';
+const REGISTER_API = 'https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1';
+const REGISTER_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
+const REGISTER_SALT = Buffer.from('4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58', 'hex');
 const APP_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
 const DEVICE = {
     iid: '1905892595382586', device_id: '1905892595378490', ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
@@ -422,18 +429,88 @@ async function signedAppGet(values) {
 
 function videoModelUrl() { const query = new URLSearchParams({ ...DEVICE }); return `${VIDEO_API}?${query}`; }
 
-function signedVideoRequest(payload) {
-    const khronos = Math.floor(Date.now() / 1000); const body = Buffer.from(payload); const ticketBase = Date.now(); let requestTicket = ticketBase; let query = ''; let url = '';
-    // branch 1 的签名变体服务端不认：抖动 _rticket 找一个可用的 branch（最多试 32 秒偏移）
-    for (let offset = 0; offset < 32; offset += 1) { requestTicket = ticketBase + offset; const values = { ...DEVICE, ts: String(khronos), _rticket: String(requestTicket) }; query = pythonUrlEncode(values); url = `${VIDEO_API}?${query}`; if (branchOf(url, body, khronos) !== 1) break; }
-    const random = Math.floor(Math.random() * 65536); const headers = {
-        'User-Agent': VIDEO_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf', 'Content-Type': 'application/json; charset=UTF-8',
-        'x-xs-from-web': '0', 'x-ss-req-ticket': String(requestTicket), 'x-tt-request-tag': 't=0;n=0', 'sdk-version': '2', 'passport-sdk-version': '50561',
-        'x-vc-bdturing-sdk-version': '3.7.2.cn', 'x-ss-stub': md5(body), 'x-gorgon': xGorgon(query, body, khronos, random),
-        'x-khronos': String(khronos), 'x-ladon': be32(khronos).toString('base64'), 'x-argus': le32(khronos).toString('base64'),
-        'x-helios': helios(khronos), 'x-medusa': buildMedusa(url, body, khronos), 'x-tt-dt': '',
+// ---- 播放身份：平台匿名设备注册（2026-11 起 video_model 必须带注册身份） ----
+function registerPayload() {
+    const now = Date.now();
+    const cdid = crypto.randomUUID();
+    const header = {
+        display_name: '红果免费短剧', update_version_code: 73932, manifest_version_code: 73932, app_version_minor: '7.3.9.32',
+        aid: 8662, channel: 'update_64', package: 'com.phoenix.read', app_version: '7.3.9.32', version_code: 73932,
+        sdk_version: '3.7.0-rc.34-fanqie-xiaoshuo', sdk_target_version: 29, git_hash: '3a88f4e', os: 'Android', os_version: '16',
+        os_api: 36, device_model: '25053RT47C', device_brand: 'Redmi', device_manufacturer: 'Redmi', cpu_abi: 'arm64-v8a',
+        release_build: 'b5e187f', density_dpi: 520, display_density: 'mdpi', resolution: '1280x2772', language: 'zh',
+        timezone: 8, access: 'wifi', not_request_sender: 0, carrier: 'CHINA MOBILE', mcc_mnc: '46000',
+        rom: 'eng.root.20231116.160340', rom_version: 'W528JS release-keys', cdid, sig_hash: '56a962410c494bbaf0b58dba20cae56f',
+        openudid: crypto.randomBytes(8).toString('hex'), clientudid: crypto.randomUUID(), ipv6_list: [], region: 'CN',
+        tz_name: 'Asia/Shanghai', tz_offset: 28800, sim_region: 'cn', sim_serial_number: [], oaid_may_support: false,
+        req_id: crypto.randomUUID(), device_platform: 'android',
+        custom: { account_region_src: 'fallback', account_region: 'cn', host_bit: 64, dragon_device_type: 'phone' },
+        pre_installed_channel: '', apk_first_install_time: now, is_system_app: 0, sdk_flavor: 'china', guest_mode: 0,
     };
-    return { url, headers, body };
+    const compressed = require('node:zlib').gzipSync(Buffer.from(JSON.stringify({ magic_tag: 'ss_app_log', header, _gen_time: now })));
+    const random = crypto.randomBytes(32);
+    const derived = crypto.createHash('sha512').update(Buffer.concat([crypto.createHash('sha512').update(random).digest(), REGISTER_SALT])).digest();
+    const cipher = crypto.createCipheriv('aes-128-cbc', derived.subarray(0, 16), derived.subarray(16, 32));
+    const plain = Buffer.concat([crypto.createHash('sha512').update(compressed).digest(), compressed]);
+    const body = Buffer.concat([Buffer.from('746305100000', 'hex'), random, cipher.update(plain), cipher.final()]);
+    return { body, ticket: now };
+}
+
+async function registerPlaybackDevice() {
+    const { body, ticket } = registerPayload();
+    const headers = {
+        'User-Agent': REGISTER_UA, Accept: 'application/json', 'Content-Type': 'application/octet-stream;tt-data=a',
+        'log-encode-type': 'gzip', 'x-ss-dp': '8662', 'x-ss-req-ticket': String(ticket), 'x-vc-bdturing-sdk-version': '4.0.3.cn',
+        lc: '101', 'sdk-version': '2', 'passport-sdk-version': '5051452', 'x-neptune': '-8|50:51:59:30:40:47:49:39',
+        'x-ss-stub': crypto.createHash('md5').update(body).digest('hex').toUpperCase(),
+    };
+    const resp = await axios.post(REGISTER_API, body, { headers, timeout: 15000, responseType: 'text' });
+    const data = jsonBody(typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data));
+    const deviceId = str(data?.device_id_str || data?.device_id);
+    const iid = str(data?.install_id_str || data?.install_id);
+    if (resp.status !== 200 || !deviceId || !iid) throw new Error('device_register 失败: ' + resp.status);
+    return { device_id: deviceId, iid, time: Date.now() };
+}
+
+let playbackIdentityCache = null;
+let playbackIdentityPending = null;
+async function playbackIdentity(fresh = false) {
+    if (!fresh && playbackIdentityCache && Date.now() - playbackIdentityCache.time < 6 * 3600 * 1000) return playbackIdentityCache;
+    if (!playbackIdentityPending) {
+        playbackIdentityPending = registerPlaybackDevice().finally(() => { playbackIdentityPending = null; });
+    }
+    const identity = await playbackIdentityPending;
+    playbackIdentityCache = identity;
+    DEVICE.device_id = identity.device_id;
+    DEVICE.iid = identity.iid;
+    return identity;
+}
+
+async function postVideoModel(payload, retry) {
+    const identity = await playbackIdentity(retry);
+    const device = { ...DEVICE, device_id: identity.device_id, iid: identity.iid, cdid: identity.cdid };
+    const body = Buffer.from(payload);
+    const khronos = Math.floor(Date.now() / 1000); const ticketBase = Date.now();
+    const host = retry ? PLAYBACK_HOST_ALT : PLAYBACK_HOST;
+    let query = ''; let url = ''; let requestTicket = ticketBase;
+    for (let n = 0; n < 128; n += 1) {
+        requestTicket = ticketBase + n;
+        query = pythonUrlEncode({ ...device, ts: String(khronos), _rticket: String(requestTicket) });
+        url = `https://${host}/novel/player/multi_video_model/v1/?${query}`;
+        if (branchOf(url, body, khronos) === 0) break;
+        if (n === 127) throw new Error('无法生成播放请求签名');
+    }
+    const headers = {
+        'User-Agent': PLAYBACK_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf', 'Content-Type': 'application/json; charset=UTF-8',
+        'x-ss-req-ticket': String(requestTicket), 'sdk-version': '2', 'x-xs-from-web': '0', 'x-khronos': String(khronos),
+        'x-gorgon': xGorgon(query, body, khronos, Math.floor(Math.random() * 65536)), 'x-ladon': be32(khronos).toString('base64'),
+        'x-argus': le32(khronos).toString('base64'), 'x-helios': helios(khronos), 'x-medusa': buildMedusa(url, body, khronos),
+        'x-tt-dt': '', 'x-tt-store-region': 'cn', 'x-tt-store-region-src': 'did',
+    };
+    const resp = await axios.post(url, body, { headers, timeout: 20000, responseType: 'text' });
+    const text = typeof resp.data === 'string' ? resp.data : (resp.data == null ? '' : JSON.stringify(resp.data));
+    if (resp.status !== 200 || !text.trim()) return null;
+    return jsonBody(text);
 }
 
 async function requestVideoModel(vid) {
@@ -441,10 +518,11 @@ async function requestVideoModel(vid) {
         biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
         mixed_video_id_map: { '1004': [str(vid)] },
     });
-    const signed = signedVideoRequest(payload);
-    const resp = await axios.post(signed.url, signed.body, { headers: signed.headers, timeout: 20000, responseType: 'text' });
-    const data = jsonBody(resp.data);
-    if (resp.status !== 200 || !data || Number(data.Code || data.code || 0) !== 0) throw new Error(`video_model failed: ${data?.Message || data?.message || resp.status}`);
+    let data = await postVideoModel(payload, false);
+    if (!data) data = await postVideoModel(payload, true); // 空正文：换新注册身份 + 备用 host 重试一次
+    if (!data) throw new Error('video_model failed: 空响应');
+    const code = Number(data.Code != null ? data.Code : (data.code != null ? data.code : 0));
+    if (code !== 0) throw new Error(`video_model failed: ${data.Message || data.message || code}`);
     return data;
 }
 
@@ -473,26 +551,39 @@ function qualityLabel(value) {
     const labels = { low: '流畅', smooth: '流畅', medium: '标清', normal: '高清', high: '超清', original: '原画', uhd: '原画', super_high: '原画' };
     return labels[str(value).toLowerCase()] || str(value, '自动');
 }
-function qualityRows(videoList) {
+function inlineRows(model) {
+    const list = Array.isArray(model?.video_list) ? model.video_list : Object.values(model?.video_list || {});
     const rows = [];
-    if (!videoList || typeof videoList !== 'object') return rows;
-    for (const [key, value] of Object.entries(videoList)) {
-        const item = value && typeof value === 'object' ? value : {};
-        const quality = str(item.quality_desc || item.height || item.vheight || item.quality || key);
-        if (item.main_url && !rows.some((row) => row.quality === key)) rows.push({ key, quality, item });
+    for (const item of list) {
+        if (!item || (!item.main_url && !item.backup_url)) continue;
+        const meta = item.video_meta || {};
+        const codec = str(item.codec_type || meta.codec_type).toLowerCase();
+        const rank = ['h264', 'avc', 'avc1'].includes(codec) ? 0 : ['hevc', 'h265', 'hvc1', 'hev1', 'bytevc1'].includes(codec) ? 1 : 9;
+        if (rank === 9) continue; // bytevc2 / 未知编码：网页播放器无法解码
+        const [width, height] = [[item.vwidth, item.vheight], [item.width, item.height], [meta.vwidth, meta.vheight], [meta.width, meta.height]]
+            .map((pair) => pair.map(Number)).find((pair) => pair.every((value) => Number.isFinite(value) && value > 0)) || [0, 0];
+        const quality = width && height ? `${Math.min(width, height)}P` : str(item.quality_desc || item.definition || meta.definition || item.height || item.vheight, '自动');
+        const pixels = width && height ? Math.min(width, height) : Number(str(quality).match(/\d+/)?.[0] || 0);
+        rows.push({ key: quality, quality, pixels, codec: rank === 1 ? 'hevc' : 'h264', item });
     }
-    return rows.sort((a, b) => qualityNumber(b.quality || b.key) - qualityNumber(a.quality || a.key));
+    return rows.sort((a, b) => (a.codec === b.codec ? 0 : a.codec === 'h264' ? -1 : 1) || b.pixels - a.pixels);
 }
 
 async function fetchVideoInfo(vid) {
     const cached = videoInfoCache.get(str(vid));
     if (cached && Date.now() - cached.time < 300000) return cached.value;
     const model = modelForVideo(await requestVideoModel(vid), vid);
-    const fallback = parseFallback(model.fallback_api);
-    if (!fallback) throw new Error('fallback_api 为空');
-    const outer = jsonBody(await getText(fallback));
-    const info = outer?.video_info?.data || {};
-    const value = { model, info, rows: qualityRows(info.video_list) };
+    let info = model;
+    let rows = inlineRows(model);
+    if (!rows.length) {
+        const fallback = parseFallback(model.fallback_api);
+        if (!fallback) throw new Error('fallback_api 为空');
+        const outer = jsonBody(await getText(fallback));
+        info = outer?.video_info?.data || {};
+        rows = inlineRows(info);
+    }
+    if (!rows.length) throw new Error('本集没有兼容的播放片源');
+    const value = { model, info, rows };
     videoInfoCache.set(str(vid), { time: Date.now(), value });
     return value;
 }
@@ -637,7 +728,7 @@ function replaceSinf(data) {
     }
 }
 
-function prepareCencHeader(data, key) {
+function prepareCencHeader(data, key, codec) {
     const ftypSize = data.readUInt32BE(0); const moov = readBox(data, ftypSize);
     if (!moov || moov.type !== 'moov') throw new Error('invalid MP4 moov');
     const moovBody = data.subarray(moov.bodyStart, moov.offset + moov.size); const tracks = [];
@@ -645,7 +736,7 @@ function prepareCencHeader(data, key) {
     const parsed = tracks.map((track) => parseTrack(moovBody, track)).filter(Boolean);
     const samples = key ? buildSamples(data, parsed) : [];
     const header = Buffer.from(data.subarray(0, moov.offset + moov.size));
-    replaceFourcc(header, 'encv', 'hvc1'); replaceFourcc(header, 'enca', 'mp4a'); replaceSinf(header);
+    replaceFourcc(header, 'encv', codec === 'h264' ? 'avc1' : 'hvc1'); replaceFourcc(header, 'enca', 'mp4a'); replaceSinf(header);
     return { header, samples };
 }
 
@@ -675,17 +766,21 @@ function decryptPartial(data, start, key, prepared) {
 
 async function resolveStream(vid, quality) {
     const cacheKey = playKey(vid, quality); const cached = streamCache.get(cacheKey); if (cached && Date.now() - cached.time < 300000) return cached.value;
-    const { info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
+    const { model, info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
     const selected = rows.find((row) => row.key === wanted || qualityNumber(row.quality) === qualityNumber(wanted)) || rows[0]; if (!selected) throw new Error('没有可用清晰度');
-    let url = cleanUrl(selected.item.main_url); const seed = Buffer.from(str(info.key_seed), 'base64');
-    if (seed.length && url) url = decryptSpadeUrl(url, seed);
-    const result = { url, quality: qualityLabel(selected.quality || selected.key), key: selected.item.spade_a ? deriveContentKey(selected.item.spade_a) : null };
+    const item = selected.item || {};
+    const rawUrl = cleanUrl(item.main_url || item.backup_url);
+    const seed = Buffer.from(str(model.key_seed || info.key_seed), 'base64');
+    let url = rawUrl;
+    if (seed.length && rawUrl) { try { url = decryptSpadeUrl(rawUrl, seed) || rawUrl; } catch { url = rawUrl; } }
+    const spade = item.spade_a || (item.encrypt_info && item.encrypt_info.spade_a);
+    const result = { url, quality: qualityLabel(selected.quality || selected.key), codec: selected.codec === 'hevc' ? 'hevc' : 'h264', ua: PLAYBACK_UA, key: spade ? deriveContentKey(spade) : null };
     streamCache.set(cacheKey, { time: Date.now(), value: result }); return result;
 }
 
 async function remoteRange(stream, start, end) {
     const resp = await axios(stream.url, {
-        headers: { 'User-Agent': VIDEO_UA, Referer: 'https://novel.snssdk.com/', Range: `bytes=${start}-${end}` },
+        headers: { 'User-Agent': stream.ua || VIDEO_UA, Referer: 'https://novel.snssdk.com/', Range: `bytes=${start}-${end}` },
         timeout: 30000, responseType: 'arraybuffer',
     });
     let data = Buffer.from(resp.data);
@@ -714,7 +809,7 @@ async function prepareHeader(stream) {
             head = Buffer.concat([head, extra.data]);
         }
         head = head.subarray(0, moovEnd);
-        const p = stream.key ? prepareCencHeader(head, stream.key) : { header: head, samples: [] };
+        const p = stream.key ? prepareCencHeader(head, stream.key, stream.codec) : { header: head, samples: [] };
         stream.prepared = { total, header: p.header, samples: p.samples };
         return stream.prepared;
     })();

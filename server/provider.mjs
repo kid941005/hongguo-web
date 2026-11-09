@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import vm from "node:vm";
 import crypto from "node:crypto";
+import zlib from "node:zlib";
 import axios from "axios";
 
 // Trusted, pinned GPL source. This is a compatibility wrapper, not a sandbox for user scripts.
@@ -11,6 +12,7 @@ const source = fs.readFileSync(
 const context = vm.createContext({
   require: (name) => {
     if (name === "node:crypto") return crypto;
+    if (name === "node:zlib") return zlib;
     throw new Error("Unsupported module");
   },
   Buffer,
