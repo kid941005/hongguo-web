@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.3.1","active":"hongguo","sources":5,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.4.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.3.1
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.4.0
 ```
 
 参数与 [compose.yaml](compose.yaml) 完全一致（同样的端口、环境变量、卷与安全加固），只是不经过 compose。
@@ -134,7 +134,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 
 ## 3. 使用
 
-- **切换源**：顶栏「源」下拉框；内置红果 + 随包附带的七猫/西饭等 JS 源。
+- **切换源**：顶栏「源」下拉框；内置红果 + 随包附带的七猫/西饭/星芽/牛牛等 JS 源。
 - **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会并发查询所有源并按源交错合并，卡片左上角带源名徽标；点开卡片时自动带上它所属的源。顶部提示条会列出每个源命中多少条、哪些源失败。
 - **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。
 - **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。
@@ -197,7 +197,7 @@ hongguo-web/
 │     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时（node:vm）
 │     ├─ manager.mjs       # 源的扫描/安装/删除/启用
 │     └─ shims.js          # fetch/HTML 解析垫片（对齐 App 内 CatPaw 运行时）
-├─ sources/builtin/        # 内置 JS 源：qimao / xifan / template / maccms
+├─ sources/builtin/        # 内置 JS 源：qimao / xifan / xingya / niuniu / template / maccms
 └─ web/                    # 前端静态页 + hls.js + PWA（manifest / sw.js / icons/）
 ```
 
