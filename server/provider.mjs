@@ -25,7 +25,7 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich};",
   context,
   { timeout: 5000 }
 );
@@ -43,6 +43,62 @@ const cards = (rows) =>
   Array.from(rows)
     .filter((r) => /^\d+$/.test(String(r.url)) && r.title)
     .map(card);
+
+// ---- 推荐页数据源：红果四条榜单（真实评分） ----
+const RANK_ROUTES = ["hot-drama", "hot-real-drama", "hot-comic-drama", "hot-ai-drama"];
+const RECOMMEND_POOL_PAGES = 5; // 每条榜抓 5 页（每页 20 条）
+const RECOMMEND_TTL = 10 * 60 * 1000;
+let recommendPool = null;
+let recommendPoolAt = 0;
+let recommendPoolPending = null;
+
+const rankCard = (row) => ({
+  id: String(row.url || ""),
+  title: String(row.title || ""),
+  cover: row.img || "",
+  remarks: row.desc || "",
+  description: row.content || "",
+  tags: row.tname || "",
+  score: Number(row.score) || 0,
+  heat: row.heat || "",
+  bang: row.bang || "",
+  rank: Number(row.rank) || 0,
+});
+
+// 并发抓四条榜的全部分页，按 seriesId 去重、按真实评分降序（同分比热度）。
+// 单页失败只丢该页，不让整批推荐失败。
+async function buildRecommendPool() {
+  const jobs = [];
+  for (const route of RANK_ROUTES)
+    for (let page = 1; page <= RECOMMEND_POOL_PAGES; page += 1) jobs.push([route, page]);
+  const rows = [];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < jobs.length) {
+      const [route, page] = jobs[cursor++];
+      try {
+        const data = await api.rankPageRich(route, page);
+        for (const item of data.list) rows.push(item);
+      } catch {
+        /* 单页失败忽略 */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 3 }, worker));
+  const seen = new Map();
+  for (const row of rows) {
+    const key = String(row.url || "");
+    if (!key) continue;
+    const prev = seen.get(key);
+    if (!prev || row.score > prev.score || (row.score === prev.score && row.heatValue > prev.heatValue))
+      seen.set(key, row);
+  }
+  const list = Array.from(seen.values())
+    .sort((a, b) => b.score - a.score || b.heatValue - a.heatValue || a.rank - b.rank)
+    .map(rankCard);
+  if (!list.length) throw new Error("推荐榜单暂不可用");
+  return list;
+}
 
 export const provider = {
   async home(page = 1) {
@@ -85,6 +141,23 @@ export const provider = {
     )
       throw new Error("分集数据异常");
     return { ...card(api.itemToCard(series)), id, episodes };
+  },
+  async recommendPool() {
+    if (recommendPool && Date.now() - recommendPoolAt < RECOMMEND_TTL) return recommendPool;
+    if (!recommendPoolPending) {
+      recommendPoolPending = buildRecommendPool()
+        .then((list) => {
+          recommendPool = list;
+          recommendPoolAt = Date.now();
+          recommendPoolPending = null;
+          return list;
+        })
+        .catch((error) => {
+          recommendPoolPending = null;
+          throw error;
+        });
+    }
+    return recommendPoolPending;
   },
   async stream(id, fresh = false) {
     if (fresh) {

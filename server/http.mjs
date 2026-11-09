@@ -8,12 +8,14 @@ import { proxyMedia, proxyHls } from "./media.mjs";
 const MAX_BODY = 3 * 1024 * 1024;
 const MAX_PAGE = 500;
 
-function sendJson(res, status, value) {
-  res.writeHead(status, {
+function sendJson(res, status, value, extraHeaders) {
+  const headers = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
-  });
+  };
+  if (extraHeaders) Object.assign(headers, extraHeaders);
+  res.writeHead(status, headers);
   res.end(JSON.stringify(value));
 }
 
@@ -56,9 +58,22 @@ function requireToken(req, token) {
     throw fail("UNAUTHORIZED", "服务访问口令不正确");
 }
 
-export function createServer({ provider, sources, catalog, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
+export function createServer({ provider, sources, catalog, users = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
   const serveStatic = createStaticHandler(webDir);
   const serveStream = createStreamHandler({ provider, limit: maxStreams });
+
+  function currentUser(ctx) {
+    const t = ctx.req.headers["x-auth-token"];
+    return users && t ? users.auth(t) : null;
+  }
+  function requireUser(ctx) {
+    const user = currentUser(ctx);
+    if (!user) throw fail("UNAUTHORIZED", "请先登录");
+    return user;
+  }
+  function decode(v) {
+    try { return decodeURIComponent(v); } catch { return v; }
+  }
 
   // 路由表：[方法, 路径正则, 处理函数]。处理函数返回即响应完成；抛错交给统一错误层。
   const routes = [
@@ -69,7 +84,96 @@ export function createServer({ provider, sources, catalog, webDir, token = "", v
         version,
         active: sources.activeId,
         sources: sources.list().sources.length,
+        accounts: Boolean(users),
       })],
+
+    // ---- 账号（注册 / 登录 / 会话） ----
+    ["POST", /^\/api\/auth\/register$/, async (ctx) => {
+      if (!users) throw fail("NOT_FOUND", "账号系统未启用");
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, users.register(body.username, body.password));
+    }],
+    ["POST", /^\/api\/auth\/login$/, async (ctx) => {
+      if (!users) throw fail("NOT_FOUND", "账号系统未启用");
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, users.login(body.username, body.password));
+    }],
+    ["POST", /^\/api\/auth\/logout$/, (ctx) => {
+      if (!users) return ctx.json(200, { ok: true });
+      return ctx.json(200, users.logout(String(ctx.req.headers["x-auth-token"] || "")));
+    }],
+    ["GET", /^\/api\/auth\/me$/, (ctx) => {
+      const u = requireUser(ctx);
+      return ctx.json(200, { user: { id: u.id, username: u.username } });
+    }],
+
+    // ---- 我的数据：观看历史（跨设备同步） ----
+    ["GET", /^\/api\/me\/history$/, (ctx) => {
+      const u = requireUser(ctx);
+      const limit = Math.min(200, Math.max(1, Number(ctx.q.get("limit") || 100) || 100));
+      return ctx.json(200, { items: users.listHistory(u.id, limit) });
+    }],
+    ["PUT", /^\/api\/me\/history$/, async (ctx) => {
+      const u = requireUser(ctx);
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, users.putHistory(u.id, body));
+    }],
+    ["DELETE", /^\/api\/me\/history$/, (ctx) => {
+      const u = requireUser(ctx);
+      return ctx.json(200, users.clearHistory(u.id));
+    }],
+    ["DELETE", /^\/api\/me\/history\/([^/]+)\/([^/]+)$/, (ctx) => {
+      const u = requireUser(ctx);
+      return ctx.json(200, users.deleteHistory(u.id, decode(ctx.params[0]), decode(ctx.params[1])));
+    }],
+
+    // ---- 我的数据：收藏 ----
+    ["GET", /^\/api\/me\/favorites$/, (ctx) => ctx.json(200, { items: users.listFavorites(requireUser(ctx).id) })],
+    ["POST", /^\/api\/me\/favorites$/, async (ctx) => {
+      const u = requireUser(ctx);
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, users.addFavorite(u.id, body));
+    }],
+    ["DELETE", /^\/api\/me\/favorites\/([^/]+)\/([^/]+)$/, (ctx) => {
+      const u = requireUser(ctx);
+      return ctx.json(200, users.removeFavorite(u.id, decode(ctx.params[0]), decode(ctx.params[1])));
+    }],
+
+    // ---- 我的数据：追剧提醒 ----
+    ["GET", /^\/api\/me\/follows$/, (ctx) => ctx.json(200, { items: users.listFollows(requireUser(ctx).id) })],
+    ["POST", /^\/api\/me\/follows$/, async (ctx) => {
+      const u = requireUser(ctx);
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, users.addFollow(u.id, body));
+    }],
+    ["DELETE", /^\/api\/me\/follows\/([^/]+)\/([^/]+)$/, (ctx) => {
+      const u = requireUser(ctx);
+      return ctx.json(200, users.removeFollow(u.id, decode(ctx.params[0]), decode(ctx.params[1])));
+    }],
+    // 检查追更：默认 10 分钟节流，?force=1 强制立即检查
+    ["GET", /^\/api\/me\/follows\/updates$/, async (ctx) => {
+      const u = requireUser(ctx);
+      const force = ctx.q.get("force") === "1";
+      const now = Date.now();
+      const updates = [];
+      for (const fo of users.listFollows(u.id)) {
+        if (!force && fo.lastChecked && now - fo.lastChecked < 10 * 60 * 1000) continue;
+        let count = 0;
+        try {
+          const d = await catalog.detail(fo.source || undefined, fo.id);
+          count = (d.episodes || []).length || ((d.lines && d.lines[0] && d.lines[0].episodes) || []).length;
+        } catch {
+          continue;
+        }
+        if (count > 0) {
+          if (fo.epCount > 0 && count > fo.epCount) {
+            updates.push({ source: fo.source, id: fo.id, title: fo.title, cover: fo.cover, epCount: count, prevCount: fo.epCount, added: count - fo.epCount });
+          }
+          users.touchFollow(u.id, fo.source, fo.id, count);
+        }
+      }
+      return ctx.json(200, { updates, follows: users.listFollows(u.id) });
+    }],
 
     // ---- 源管理 ----
     ["GET", /^\/api\/sources$/, ({ json }) => json(200, sources.list())],
@@ -94,6 +198,8 @@ export function createServer({ provider, sources, catalog, webDir, token = "", v
     // ---- 目录 ----
     ["GET", /^\/api\/home$/, async ({ json, q }) =>
       json(200, await catalog.home(q.get("source") || undefined, pageOf(q)))],
+    ["GET", /^\/api\/recommend$/, async ({ json, q }) =>
+      json(200, await catalog.recommend(pageOf(q)))],
     ["GET", /^\/api\/category$/, async ({ json, q }) => {
       const tid = (q.get("tid") || "").trim();
       if (!tid) throw fail("BAD_INPUT", "缺少分类参数");

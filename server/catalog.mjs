@@ -5,6 +5,7 @@ import { fail } from "./errors.mjs";
 
 const TIMEOUT_HOME = 40000;
 const TIMEOUT_SEARCH = 60000;
+const RECOMMEND_PER_PAGE = 24;
 
 function pick(...values) {
   for (const value of values) if (value !== undefined && value !== null && value !== "") return value;
@@ -15,6 +16,7 @@ function normVod(vod) {
   if (!vod || typeof vod !== "object") return null;
   const id = String(pick(vod.vod_id, vod.id, vod.vid));
   if (!id) return null; // 没有 id 的条目点进去必然 400，直接丢弃
+  const score = Number(pick(vod.score, 0)) || 0;
   return {
     id,
     title: String(pick(vod.vod_name, vod.title, vod.name)),
@@ -23,6 +25,11 @@ function normVod(vod) {
     year: String(pick(vod.vod_year, vod.year)),
     area: String(pick(vod.vod_area, vod.area)),
     desc: String(pick(vod.vod_content, vod.description, vod.desc)),
+    // 推荐页专用：真实评分/热度/榜名，其它源缺省为 0/空
+    score,
+    heat: String(pick(vod.heat)),
+    bang: String(pick(vod.bang)),
+    rank: Number(pick(vod.rank, 0)) || 0,
   };
 }
 
@@ -329,5 +336,30 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
-  return { home, category, search, searchAll, detail, play };
+  // 推荐页：红果各榜单按真实评分合并后的稳定列表，按页切分给前端。
+  async function recommend(page = 1) {
+    const pageNo = Number(page) || 1;
+    const pool = await provider.recommendPool();
+    const start = (pageNo - 1) * RECOMMEND_PER_PAGE;
+    const slice = pool.slice(start, start + RECOMMEND_PER_PAGE);
+    return {
+      source: "hongguo",
+      sourceName: "红果推荐",
+      recommend: true,
+      page: pageNo,
+      items: slice.map((row) => ({
+        ...normVod(row),
+        source: "hongguo",
+        sourceName: row.bang || "红果热播榜",
+        score: row.score,
+        heat: row.heat,
+        bang: row.bang,
+        rank: row.rank,
+      })),
+      hasMore: start + slice.length < pool.length,
+      total: pool.length,
+    };
+  }
+
+  return { home, category, search, searchAll, recommend, detail, play };
 }

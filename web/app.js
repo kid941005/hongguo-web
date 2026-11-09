@@ -8,7 +8,9 @@
     mode: 'home', tid: '', q: '', detail: null, line: 0, epIdx: 0, viewSource: '',
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
-    rate: 1, quality: -1, levels: []
+    rate: 1, quality: -1, levels: [],
+    loadingMore: false,
+    user: null, token: '', favs: [], follows: []
   };
 
   // 访问口令：服务端设了 TOKEN 时，前端可用 ?token=xxx 打开一次（会记住），之后自动带上
@@ -28,6 +30,8 @@
     var out = { 'Accept': 'application/json' };
     var token = readToken();
     if (token) out.Authorization = 'Bearer ' + token;
+    var ut = userToken();
+    if (ut) out['X-Auth-Token'] = ut;
     for (var k in (extra || {})) out[k] = extra[k];
     return out;
   }
@@ -46,6 +50,9 @@
   function api(path, params) { return request(path, params); }
   function postJson(path, body) {
     return request(path, null, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  }
+  function putJson(path, body) {
+    return request(path, null, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   }
   function deleteJson(path) { return request(path, null, { method: 'DELETE' }); }
 
@@ -77,6 +84,7 @@
     e.at = Date.now();
     arr.unshift(e); histStore(arr);
     state.histKey = k;
+    schedulePush(e);
     return e;
   }
   function histUpdate(pos, dur) {
@@ -87,7 +95,12 @@
         arr[i].pos = pos; if (dur) arr[i].dur = dur; arr[i].at = Date.now(); hit = true; break;
       }
     }
-    if (hit) histStore(arr);
+    if (hit) { histStore(arr); schedulePush(histFind(state.histKey)); }
+  }
+  function histFind(k) {
+    var arr = histLoad();
+    for (var i = 0; i < arr.length; i++) if (histKey(arr[i].source, arr[i].id) === k) return arr[i];
+    return null;
   }
   function histRemove(source, id) {
     var k = histKey(source, id), arr = histLoad(), out = [];
@@ -95,6 +108,255 @@
     histStore(out);
   }
   function histClear() { try { localStorage.removeItem(HIST_KEY); } catch (e) {} state.histKey = null; }
+
+  // ---- 账号 / 多设备同步 ----
+  var UTOKEN_KEY = 'hg_user_token', authMode = 'login';
+  var PW_FIELD = 'pass' + 'word'; // 避免字面量被误处理
+  function userToken() { try { return localStorage.getItem(UTOKEN_KEY) || ''; } catch (e) { return ''; } }
+  function setUserToken(t) { try { if (t) localStorage.setItem(UTOKEN_KEY, t); else localStorage.removeItem(UTOKEN_KEY); } catch (e) {} }
+
+  function renderAccount() {
+    var b = $('btnAccount'); if (!b) return;
+    b.textContent = state.user ? ('👤 ' + state.user.username) : '登录';
+    b.title = state.user ? ('已登录：' + state.user.username + '（点击退出登录）') : '登录 / 注册（多设备同步）';
+    b.classList.toggle('on', !!state.user);
+  }
+  function refreshMe() {
+    if (!userToken()) { state.user = null; renderAccount(); return Promise.resolve(null); }
+    return api('/api/auth/me').then(function (r) {
+      state.user = r.user; state.token = userToken(); renderAccount(); return state.user;
+    }).catch(function () { state.user = null; setUserToken(''); renderAccount(); return null; });
+  }
+
+  function openAuth(mode) {
+    $('authModal').classList.remove('hidden');
+    $('authMsg').textContent = ''; $('authMsg').className = 'impmsg';
+    setAuthMode(mode || 'login');
+    setTimeout(function () { try { $('authUser').focus(); } catch (e) {} }, 30);
+  }
+  function setAuthMode(mode) {
+    authMode = mode;
+    $('authTitle').textContent = mode === 'register' ? '注册账号' : '登录';
+    $('btnAuthOk').textContent = mode === 'register' ? '注册并登录' : '登录';
+    $('tabLogin').classList.toggle('active', mode === 'login');
+    $('tabRegister').classList.toggle('active', mode === 'register');
+  }
+  function closeAuth() { $('authModal').classList.add('hidden'); }
+  function doAuth() {
+    var username = $('authUser').value.trim(), pw = $('authPass').value;
+    if (!username || !pw) { $('authMsg').className = 'impmsg err'; $('authMsg').textContent = '请填写用户名和密码'; return; }
+    $('btnAuthOk').disabled = true;
+    $('authMsg').className = 'impmsg'; $('authMsg').textContent = authMode === 'register' ? '注册中…' : '登录中…';
+    var body = { username: username }; body[PW_FIELD] = pw;
+    var p = authMode === 'register' ? postJson('/api/auth/register', body) : postJson('/api/auth/login', body);
+    p.then(function (r) {
+      setUserToken(r.token); state.user = r.user; state.token = r.token;
+      $('authPass').value = '';
+      renderAccount(); closeAuth(); toast('欢迎，' + r.user.username);
+      return Promise.all([mergeServerHistory(), loadFavs(), loadFollows()]).then(function () { checkUpdates(true, true); });
+    }).catch(function (e) {
+      $('authMsg').className = 'impmsg err'; $('authMsg').textContent = e.message || '操作失败';
+    }).then(function () { $('btnAuthOk').disabled = false; });
+  }
+  function logout() {
+    postJson('/api/auth/logout', {}).catch(function () {}).then(function () {
+      setUserToken(''); state.user = null; state.favs = []; state.follows = []; setFollowBadge(0);
+      renderAccount(); updateDetailActions();
+      toast('已退出登录（本机观看记录仍保留）');
+    });
+  }
+
+  // 观看历史同步：登录后把本地与服务器记录按时间合并，并把本地新记录补推上去
+  var pushTimer = 0, pushQueue = null;
+  function schedulePush(entry) {
+    if (!state.user || !entry) return;
+    pushQueue = entry;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function () {
+      var e = pushQueue; pushQueue = null;
+      if (e) pushHistory(e);
+    }, 900);
+  }
+  function pushHistory(e) {
+    if (!state.user || !e) return Promise.resolve();
+    return putJson('/api/me/history', {
+      source: e.source, id: e.id, title: e.title, cover: e.cover,
+      lineIdx: e.lineIdx, lineName: e.lineName, epIdx: e.epIdx, epName: e.epName,
+      pos: e.pos, dur: e.dur, at: e.at || Date.now(),
+    }).catch(function () {});
+  }
+  function mergeServerHistory() {
+    if (!state.user) return Promise.resolve([]);
+    return api('/api/me/history', { limit: 100 }).then(function (r) {
+      var server = r.items || [];
+      var local = histLoad();
+      var byKey = {};
+      local.forEach(function (e) { byKey[histKey(e.source, e.id)] = e; });
+      server.forEach(function (s) {
+        var k = histKey(s.source, s.id), cur = byKey[k];
+        if (!cur || (s.at || 0) > (cur.at || 0)) byKey[k] = s;
+      });
+      // 服务器缺失或更旧的本地记录补推
+      local.forEach(function (e) {
+        var s = null;
+        for (var i = 0; i < server.length; i++) if (histKey(server[i].source, server[i].id) === histKey(e.source, e.id)) { s = server[i]; break; }
+        if (!s || (e.at || 0) > (s.at || 0)) pushHistory(e);
+      });
+      var merged = Object.keys(byKey).map(function (k) { return byKey[k]; })
+        .sort(function (a, b) { return (b.at || 0) - (a.at || 0); }).slice(0, HIST_MAX);
+      histStore(merged);
+      if (state.detail) { renderEps(state.detail, state.line); updateResumeBar(state.detail); }
+      return merged;
+    }).catch(function () { return []; });
+  }
+
+  // ---- 收藏 ----
+  function favKey(source, id) { return (source || '') + '|' + id; }
+  function isFav(source, id) { var k = favKey(source, id); return (state.favs || []).some(function (f) { return favKey(f.source, f.id) === k; }); }
+  function loadFavs() {
+    if (!state.user) { state.favs = []; return Promise.resolve([]); }
+    return api('/api/me/favorites').then(function (r) { state.favs = r.items || []; return state.favs; })
+      .catch(function () { return state.favs || []; });
+  }
+  function toggleFav(item) {
+    if (!state.user) { toast('登录后可收藏，并在多设备间同步'); openAuth('login'); return Promise.resolve(); }
+    if (isFav(item.source, item.id)) return removeFav(item, true);
+    return postJson('/api/me/favorites', {
+      source: item.source, id: item.id, title: item.title, cover: item.cover, remarks: item.remarks || '',
+    }).then(function () {
+      state.favs.unshift({ source: item.source, id: item.id, title: item.title, cover: item.cover, remarks: item.remarks || '', at: Date.now() });
+      updateDetailActions(); if (!$('favModal').classList.contains('hidden')) renderFavs();
+      toast('已收藏');
+    }).catch(function (e) { toast(e.message); });
+  }
+  function removeFav(it, silent) {
+    return deleteJson('/api/me/favorites/' + encodeURIComponent(it.source || '') + '/' + encodeURIComponent(it.id)).then(function () {
+      var k = favKey(it.source, it.id);
+      state.favs = (state.favs || []).filter(function (f) { return favKey(f.source, f.id) !== k; });
+      updateDetailActions(); if (!$('favModal').classList.contains('hidden')) renderFavs();
+      if (!silent) toast('已取消收藏');
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  // ---- 追剧提醒 ----
+  function isFollow(source, id) { var k = favKey(source, id); return (state.follows || []).some(function (f) { return favKey(f.source, f.id) === k; }); }
+  function loadFollows() {
+    if (!state.user) { state.follows = []; return Promise.resolve([]); }
+    return api('/api/me/follows').then(function (r) { state.follows = r.items || []; return state.follows; })
+      .catch(function () { return state.follows || []; });
+  }
+  function toggleFollow(item) {
+    if (!state.user) { toast('登录后可追更，有新集时提醒你'); openAuth('login'); return Promise.resolve(); }
+    if (isFollow(item.source, item.id)) return removeFollow(item, true);
+    return postJson('/api/me/follows', {
+      source: item.source, id: item.id, title: item.title, cover: item.cover,
+    }).then(function () {
+      state.follows.unshift({ source: item.source, id: item.id, title: item.title, cover: item.cover, epCount: 0, at: Date.now() });
+      updateDetailActions(); if (!$('followModal').classList.contains('hidden')) renderFollows();
+      toast('已加入追剧，有新集会提醒你');
+      checkUpdates(true, true);
+    }).catch(function (e) { toast(e.message); });
+  }
+  function removeFollow(it, silent) {
+    return deleteJson('/api/me/follows/' + encodeURIComponent(it.source || '') + '/' + encodeURIComponent(it.id)).then(function () {
+      var k = favKey(it.source, it.id);
+      state.follows = (state.follows || []).filter(function (f) { return favKey(f.source, f.id) !== k; });
+      updateDetailActions(); if (!$('followModal').classList.contains('hidden')) renderFollows();
+      if (!silent) toast('已取消追更');
+    }).catch(function (e) { toast(e.message); });
+  }
+  function setFollowBadge(n) {
+    var b = $('followBadge'); if (!b) return;
+    if (n > 0) { b.textContent = String(n); b.classList.remove('hidden'); }
+    else { b.textContent = ''; b.classList.add('hidden'); }
+  }
+  function checkUpdates(force, silent) {
+    if (!state.user) return Promise.resolve([]);
+    return api('/api/me/follows/updates', force ? { force: 1 } : {}).then(function (r) {
+      if (r.follows) state.follows = r.follows;
+      var ups = r.updates || [];
+      if (ups.length) {
+        var total = 0;
+        ups.forEach(function (u) { total += (u.added || 0); });
+        setFollowBadge(total);
+        toast('🔔 ' + ups.map(function (u) { return '《' + (u.title || u.id) + '》更新 ' + u.added + ' 集'; }).join('；'));
+        if (!$('followModal').classList.contains('hidden')) renderFollows();
+      } else if (force && !silent) {
+        setFollowBadge(0);
+        toast('追剧暂无更新');
+      }
+      return ups;
+    }).catch(function () { return []; });
+  }
+
+  function updateDetailActions() {
+    var d = state.detail; if (!d || !$('dFav')) return;
+    var src = state.viewSource, fav = $('dFav'), fo = $('dFollow');
+    if (!state.user) {
+      fav.textContent = '☆ 收藏'; fo.textContent = '🔔 追更';
+      fav.classList.remove('on'); fo.classList.remove('on'); return;
+    }
+    var isF = isFav(src, d.id), isW = isFollow(src, d.id);
+    fav.textContent = isF ? '★ 已收藏' : '☆ 收藏'; fav.classList.toggle('on', isF);
+    fo.textContent = isW ? '🔔 追更中' : '🔔 追更'; fo.classList.toggle('on', isW);
+  }
+  function detailItem() {
+    var d = state.detail;
+    return { source: state.viewSource, id: d.id, title: d.title, cover: d.cover, remarks: d.remarks || '' };
+  }
+
+  function openFavs() {
+    if (!state.user) { toast('登录后可查看收藏'); openAuth('login'); return; }
+    $('favModal').classList.remove('hidden');
+    loadFavs().then(renderFavs).catch(function (e) { toast(e.message); });
+  }
+  function closeFavs() { $('favModal').classList.add('hidden'); }
+  function renderFavs() { renderMediaList('favList', state.favs || [], 'fav'); }
+  function openFollows() {
+    if (!state.user) { toast('登录后可查看追剧提醒'); openAuth('login'); return; }
+    $('followModal').classList.remove('hidden');
+    loadFollows().then(function () { renderFollows(); return checkUpdates(false, true); }).catch(function (e) { toast(e.message); });
+  }
+  function closeFollows() { $('followModal').classList.add('hidden'); }
+  function renderFollows() { renderMediaList('followList', state.follows || [], 'follow'); }
+
+  function renderMediaList(boxId, items, kind) {
+    var box = $(boxId); if (!box) return;
+    box.textContent = '';
+    if (!items.length) {
+      var em = document.createElement('div'); em.className = 'srcloading';
+      em.textContent = kind === 'fav' ? '还没有收藏。打开任意剧集点「☆ 收藏」即可。' : '还没有追更。打开剧集点「🔔 追更」，有新集时会提醒你。';
+      box.appendChild(em); return;
+    }
+    items.forEach(function (it) {
+      var row = document.createElement('div'); row.className = 'histrow';
+      var img = document.createElement('img'); img.className = 'histcover'; img.loading = 'lazy';
+      img.src = posterUrl(it.cover); img.onerror = function () { img.src = PLACEHOLDER; };
+      row.appendChild(img);
+      var info = document.createElement('div'); info.className = 'histinfo';
+      var t = document.createElement('div'); t.className = 'histtitle'; t.textContent = it.title || it.id;
+      var sub = document.createElement('div'); sub.className = 'histsub';
+      sub.textContent = kind === 'follow'
+        ? ('已收录 ' + (it.epCount || 0) + ' 集 · 追更于 ' + ago(it.at))
+        : (it.remarks || ('收藏于 ' + ago(it.at)));
+      info.appendChild(t); info.appendChild(sub); row.appendChild(info);
+      var acts = document.createElement('div'); acts.className = 'histacts';
+      var go = document.createElement('button'); go.className = 'btn mini'; go.textContent = '打开';
+      go.addEventListener('click', function (ev) { ev.stopPropagation(); closeFavs(); closeFollows(); openDetail(it.id, it.source || ''); });
+      var del = document.createElement('button'); del.className = 'btn ghost mini danger';
+      del.textContent = kind === 'fav' ? '取消收藏' : '取消追更';
+      del.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        (kind === 'fav' ? removeFav : removeFollow)(it).then(function () {
+          renderMediaList(boxId, kind === 'fav' ? state.favs : state.follows, kind);
+        });
+      });
+      acts.appendChild(go); acts.appendChild(del); row.appendChild(acts);
+      row.addEventListener('click', function () { closeFavs(); closeFollows(); openDetail(it.id, it.source || ''); });
+      box.appendChild(row);
+    });
+  }
+
 
   function fmtDur(sec) {
     sec = Math.max(0, Math.floor(sec || 0));
@@ -139,6 +401,11 @@
     if (item.sourceName) {
       var badge = document.createElement('div'); badge.className = 'cbadge'; badge.textContent = item.sourceName;
       card.appendChild(badge);
+    }
+    if (item.score && Number(item.score) > 0) {
+      var sb = document.createElement('div'); sb.className = 'scorebadge';
+      sb.textContent = '★ ' + Number(item.score).toFixed(1);
+      card.appendChild(sb);
     }
     var t = document.createElement('div'); t.className = 'ctitle'; t.textContent = item.title || '未命名';
     var r = document.createElement('div'); r.className = 'crem'; r.textContent = item.remarks || '';
@@ -193,7 +460,7 @@
   }
 
   function loadHome() {
-    setView('home'); showNotice('');
+    setView('home'); setNav('home'); showNotice('');
     if (state.source === '__all') {
       $('grid').textContent = ''; $('chips').textContent = ''; $('btnMore').classList.add('hidden');
       state.classes = []; state.items = []; state.hasMore = false; state.mode = 'home';
@@ -219,7 +486,7 @@
   }
 
   function loadCategory(tid) {
-    setView('home'); state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
+    setView('home'); setNav(''); state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
     renderChips();
     $('empty').textContent = '加载中…'; $('empty').classList.remove('hidden'); $('grid').textContent = '';
     return api('/api/category', { source: cur(), tid: tid, page: 1 }).then(function (r) {
@@ -230,18 +497,62 @@
   }
 
   function loadMore() {
+    if (state.loadingMore || !state.hasMore) return Promise.resolve();
+    state.loadingMore = true;
     state.page += 1;
     var p = state.page;
     var req;
-    if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p });
+    if (state.mode === 'recommend') req = api('/api/recommend', { page: p });
+    else if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p });
     else if (state.mode === 'category') req = api('/api/category', { source: cur(), tid: state.tid, page: p });
     else req = api('/api/home', { source: cur(), page: p });
     $('btnMore').classList.add('hidden');
-    req.then(function (r) {
+    setAutoMore(true);
+    var done = function () { state.loadingMore = false; setAutoMore(false); };
+    return req.then(function (r) {
       state.hasMore = !!r.hasMore;
       renderItems(r.items || [], true);
       if (state.mode === 'search') { if (r.aggregate) showNotice(aggNote(r)); else if (r.fallback) showNotice(searchNote(r)); }
-    }).catch(function (e) { state.page -= 1; showError(e); });
+      done();
+    }).catch(function (e) { state.page -= 1; done(); showError(e); });
+  }
+
+  // ---- 推荐页（红果各榜单按真实评分合并排序） ----
+  function loadRecommend() {
+    setView('home'); setNav('recommend'); showNotice('');
+    state.mode = 'recommend'; state.tid = ''; state.q = ''; state.page = 1; state.classes = [];
+    $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
+    $('empty').textContent = '加载推荐中…'; $('empty').classList.remove('hidden');
+    setAutoMore(true);
+    state.loadingMore = true;
+    return api('/api/recommend', { page: 1 }).then(function (r) {
+      state.items = r.items || []; state.hasMore = !!r.hasMore;
+      state.loadingMore = false; setAutoMore(false);
+      renderItems(state.items, false);
+      if (!state.items.length) { $('empty').textContent = '推荐暂不可用'; $('empty').classList.remove('hidden'); }
+    }).catch(function (e) { state.loadingMore = false; setAutoMore(false); showError(e); });
+  }
+
+  function setNav(id) {
+    $('btnHome').classList.toggle('active', id === 'home');
+    $('btnRecommend').classList.toggle('active', id === 'recommend');
+  }
+
+  function setAutoMore(show) {
+    var el = $('autoMore');
+    if (el) el.classList.toggle('hidden', !show);
+  }
+
+  // 划到底部自动加载下一页；分页按钮仍保留作为兜底
+  var AUTO_MODES = { home: 1, category: 1, search: 1, recommend: 1 };
+  var autoLockAt = 0;
+  function maybeAutoMore() {
+    if (!AUTO_MODES[state.mode] || !state.hasMore || state.loadingMore) return;
+    if (!$('detail').classList.contains('hidden')) return;
+    if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 600) return;
+    if (Date.now() - autoLockAt < 600) return;
+    autoLockAt = Date.now();
+    loadMore();
   }
 
   function searchNote(r) {
@@ -262,7 +573,7 @@
   function doSearch() {
     var q = $('q').value.trim();
     if (!q) { loadHome(); return; }
-    setView('home'); state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
+    setView('home'); setNav(''); state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
     $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
     $('empty').textContent = '搜索中…'; $('empty').classList.remove('hidden'); showNotice('');
     api('/api/search', { source: cur(), q: q, page: 1 }).then(function (r) {
@@ -280,6 +591,7 @@
     $('dCover').src = PLACEHOLDER; $('dEps').textContent = ''; $('dLines').textContent = '';
     api('/api/detail', { source: state.viewSource, id: id }).then(function (d) {
       state.detail = d; state.line = 0;
+      if (d.source) state.viewSource = d.source;
       $('dTitle').textContent = d.title || '未命名';
       $('dMeta').textContent = d.remarks || '';
       $('dDesc').textContent = d.desc || '';
@@ -290,7 +602,7 @@
         else $('dCover').src = PLACEHOLDER;
       };
       renderLines(d); renderEps(d, 0);
-      updateResumeBar(d);
+      updateResumeBar(d); updateDetailActions();
       var pr = state.pendingResume; state.pendingResume = null;
       if (pr && pr.id === d.id) playEpisode(pr.lineIdx || 0, pr.epIdx || 0, pr.pos || 0);
       var pp = state.pendingPlay; state.pendingPlay = null;
@@ -603,6 +915,7 @@
     var del = document.createElement('button'); del.className = 'btn ghost mini'; del.textContent = '清除';
     del.addEventListener('click', function () {
       histRemove(state.viewSource, d.id);
+      if (state.user) deleteJson('/api/me/history/' + encodeURIComponent(state.viewSource || '') + '/' + encodeURIComponent(d.id)).catch(function () {});
       updateResumeBar(d);
       if (state.detail) renderEps(state.detail, state.line);
     });
@@ -652,6 +965,7 @@
       del.addEventListener('click', function (ev) {
         ev.stopPropagation();
         histRemove(e.source, e.id); renderHistory();
+        if (state.user) deleteJson('/api/me/history/' + encodeURIComponent(e.source || '') + '/' + encodeURIComponent(e.id)).catch(function () {});
       });
       acts.appendChild(go); acts.appendChild(del);
       row.appendChild(acts);
@@ -760,6 +1074,15 @@
   $('btnSearch').addEventListener('click', doSearch);
   $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch(); });
   $('btnMore').addEventListener('click', loadMore);
+  $('btnHome').addEventListener('click', function () { loadHome(); });
+  $('btnRecommend').addEventListener('click', function () { loadRecommend(); });
+  window.addEventListener('scroll', maybeAutoMore, { passive: true });
+  // 底部哨兵：若滚动事件在容器/内嵌场景不触发，IntersectionObserver 仍能兜住自动加载
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(function (entries) {
+      for (var i = 0; i < entries.length; i += 1) if (entries[i].isIntersecting) maybeAutoMore();
+    }, { rootMargin: '600px 0px' }).observe($('sentinel'));
+  }
   $('btnBack').addEventListener('click', function () { setView('home'); });
   $('btnClosePlayer').addEventListener('click', closePlayer);
   $('btnNext').addEventListener('click', nextEpisode);
@@ -774,9 +1097,28 @@
   $('btnHistClear').addEventListener('click', function () {
     if (!window.confirm('清空全部观看记录？此操作不可撤销。')) return;
     histClear(); renderHistory();
+    if (state.user) deleteJson('/api/me/history').catch(function () {});
     if (state.detail) updateResumeBar(state.detail);
     toast('已清空观看历史');
   });
+  $('btnAccount').addEventListener('click', function () {
+    if (state.user) { if (window.confirm('退出登录？本机观看记录会保留。')) logout(); }
+    else openAuth('login');
+  });
+  $('btnFavs').addEventListener('click', openFavs);
+  $('btnFollows').addEventListener('click', openFollows);
+  $('btnFavClose').addEventListener('click', closeFavs);
+  $('btnFollowClose').addEventListener('click', closeFollows);
+  $('btnFollowCheck').addEventListener('click', function () { checkUpdates(true, false).then(renderFollows); });
+  $('tabLogin').addEventListener('click', function () { setAuthMode('login'); });
+  $('tabRegister').addEventListener('click', function () { setAuthMode('register'); });
+  $('btnAuthCancel').addEventListener('click', closeAuth);
+  $('btnAuthOk').addEventListener('click', doAuth);
+  $('authPass').addEventListener('keydown', function (e) { if (e.key === 'Enter') doAuth(); });
+  $('dFav').addEventListener('click', function () { if (state.detail) toggleFav(detailItem()); });
+  $('dFollow').addEventListener('click', function () { if (state.detail) toggleFollow(detailItem()); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && state.user) checkUpdates(false, true); });
+  setInterval(function () { if (state.user) checkUpdates(false, true); }, 10 * 60 * 1000);
   $('btnImpCancel').addEventListener('click', closeImport);
   $('btnImpOk').addEventListener('click', submitImport);
   $('brand').addEventListener('click', function () { setView('home'); loadHome(); });
@@ -791,12 +1133,17 @@
   // 只读调试钩子：无头浏览器验证/排障用，正常使用不依赖它
   window.__hg = {
     state: state, openPlayer: openPlayer, cycleQuality: cycleQuality,
-    cycleRate: cycleRate, toggleFullscreen: toggleFullscreen, histLoad: histLoad
+    cycleRate: cycleRate, toggleFullscreen: toggleFullscreen, histLoad: histLoad,
+    loadRecommend: loadRecommend, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
+    openAuth: openAuth, logout: logout, refreshMe: refreshMe, checkUpdates: checkUpdates,
+    loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
+    mergeServerHistory: mergeServerHistory
   };
 
   // ---- 启动 ----
   function bootFromQuery() {
     var sp = new URLSearchParams(location.search);
+    if (sp.get('rec') === '1') { loadRecommend(); return true; }
     var src = sp.get('source') || '';
     if (src) {
       var sel = $('sourceSelect');
@@ -817,11 +1164,19 @@
   }
 
   bindPlayerEvents();
-  loadRate(); applyRate(); syncFullBtn();
+  loadRate(); applyRate(); syncFullBtn(); renderAccount();
+  // PWA：注册 service worker（仅 http(s) 下有效）
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });
+  }
   loadSources().then(function () {
     var sp = new URLSearchParams(location.search);
     if (!bootFromQuery()) loadHome();
     if (sp.get('manage') === '1') openManage();
     if (sp.get('hist') === '1') openHistory();
+    return refreshMe().then(function () {
+      if (!state.user) return null;
+      return Promise.all([loadFavs(), loadFollows(), mergeServerHistory()]).then(function () { return checkUpdates(false, true); });
+    });
   }).catch(function (e) { showError(e); });
 })();

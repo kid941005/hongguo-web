@@ -13,6 +13,7 @@ const STATUS = {
   // 权限
   PROTECTED: 403,
   UNAUTHORIZED: 401,
+  USER_EXISTS: 409,
   // 资源
   NOT_FOUND: 404,
   // 服务端 / 上游

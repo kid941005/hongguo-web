@@ -156,13 +156,73 @@ function decodeHtml(value) {
         .replace(/&amp;/g, '&');
 }
 
+const RANK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+// 榜单数据只存在于 HTML 的 data-fn-args 属性里（客户端 hydration 负载），
+// 属性值可能是单引号包裹且内部 &quot; 转义，必须宽容解析后递归找带 rankList 的对象。
+function findRankPayload(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 6) return null;
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findRankPayload(item, depth + 1);
+            if (found) return found;
+        }
+        return null;
+    }
+    if (Array.isArray(value.rankList)) return value;
+    for (const item of Object.values(value)) {
+        const found = findRankPayload(item, depth + 1);
+        if (found) return found;
+    }
+    return null;
+}
+
 function rankData(html) {
-    const match = html.match(/data-fn-name="r"[^>]*data-fn-args="([^"]+)"/);
-    if (!match) throw new Error('榜单页面没有数据');
-    const args = jsonBody(decodeHtml(match[1]));
-    const payload = Array.isArray(args) ? args[2] : null;
-    if (!payload?.isSuccess || !Array.isArray(payload.rankList)) throw new Error('榜单数据格式错误');
-    return payload;
+    const re = /data-fn-args=(?:"([^"]+)"|'([^']+)')/g;
+    let match;
+    while ((match = re.exec(html))) {
+        let parsed;
+        try {
+            parsed = jsonBody(decodeHtml(match[1] || match[2]));
+            if (typeof parsed === 'string') parsed = jsonBody(parsed);
+        } catch (error) {
+            continue;
+        }
+        const payload = findRankPayload(parsed);
+        if (payload) return payload;
+    }
+    throw new Error('榜单页面没有数据');
+}
+
+function firstNumber(value) {
+    const match = str(value).match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : 0;
+}
+
+// 「11578万热度」「1.2亿热度」→ 可比较的整数
+function heatValue(value) {
+    const raw = str(value);
+    const amount = firstNumber(raw);
+    if (/亿/.test(raw)) return Math.round(amount * 100000000);
+    if (/万/.test(raw)) return Math.round(amount * 10000);
+    return Math.round(amount);
+}
+
+function rankItemRich(item, route, bang) {
+    const card = rankItemToCard(item);
+    return {
+        ...card,
+        rank: Number(item?.rank || 0),
+        score: firstNumber(item?.scoreText),
+        scoreText: str(item?.scoreText),
+        heat: str(item?.heatText),
+        heatValue: heatValue(item?.heatText),
+        favorite: str(item?.favoriteText),
+        bang: bang || '',
+        route,
+        episodeCount: Number(item?.episodeCount || 0),
+        statusTags: Array.isArray(item?.statusTags) ? item.statusTags : [],
+    };
 }
 
 function rankItemToCard(item) {
@@ -176,21 +236,44 @@ function rankItemToCard(item) {
     });
 }
 
-async function rankPage(route, page = 1) {
+async function rankPayload(route, page = 1) {
     if (!RANK_ROUTE_RE.test(route)) throw new Error('不支持的榜单');
     const suffix = page > 1 ? `?page=${page}` : '';
-    const payload = rankData(await getText(`${SITE}/rank/${route}${suffix}`));
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            // 榜单页必须用浏览器 UA：App UA 下部分榜单只回一个无数据的 data-fn-args
+            return rankData(await getText(`${SITE}/rank/${route}${suffix}`, { headers: { 'User-Agent': RANK_UA }, timeout: 15000 }));
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError || new Error('榜单页面没有数据');
+}
+
+function rankPagination(payload, page, size) {
     const pagination = payload.pagination || {};
-    const list = payload.rankList.map(rankItemToCard).filter((item) => item.url && item.title);
     return {
-        list,
-        pagination: {
-            totalPages: Number(pagination.totalPages || 1),
-            pageNum: Number(pagination.pageNum || page),
-            pageSize: Number(pagination.pageSize || list.length || PAGE_SIZE),
-            total: Number(pagination.total || pagination.totalCount || (Number(pagination.totalPages || 1) * Number(pagination.pageSize || list.length || PAGE_SIZE))),
-        },
+        totalPages: Number(pagination.totalPages || 1),
+        pageNum: Number(pagination.pageNum || page),
+        pageSize: Number(pagination.pageSize || size || PAGE_SIZE),
+        total: Number(pagination.total || pagination.totalCount || (Number(pagination.totalPages || 1) * Number(pagination.pageSize || size || PAGE_SIZE))),
     };
+}
+
+async function rankPage(route, page = 1) {
+    const payload = await rankPayload(route, page);
+    const list = payload.rankList.map(rankItemToCard).filter((item) => item.url && item.title);
+    return { list, pagination: rankPagination(payload, page, list.length) };
+}
+
+// 带真实评分/热度/榜名的榜单页，供推荐页按评分排序
+async function rankPageRich(route, page = 1) {
+    const payload = await rankPayload(route, page);
+    const meta = Object.values(CATEGORY_CONFIG).find((item) => item.kind === 'rank' && item.route === route);
+    const bang = meta?.type_name || '';
+    const list = payload.rankList.map((item) => rankItemRich(item, route, bang)).filter((item) => item.url && item.title);
+    return { route, bang, list, pagination: rankPagination(payload, page, list.length) };
 }
 
 function categoryType(value) {

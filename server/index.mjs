@@ -5,6 +5,8 @@ import { provider } from "./provider.mjs";
 import { SourceManager } from "./sources/manager.mjs";
 import { createCatalog } from "./catalog.mjs";
 import { createServer } from "./http.mjs";
+import { openDb } from "./db.mjs";
+import { UserStore } from "./users.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { version } = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"));
@@ -23,10 +25,13 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 
 const sources = new SourceManager({ builtinDir: BUILTIN_DIR, dataDir: DATA_DIR });
 const catalog = createCatalog({ provider, sources });
+const db = openDb(DATA_DIR);
+const users = new UserStore(db);
 const server = createServer({
   provider,
   sources,
   catalog,
+  users,
   webDir: path.join(ROOT, "web"),
   token: TOKEN,
   version,
@@ -54,7 +59,10 @@ function shutdown(signal) {
   if (closing) return;
   closing = true;
   console.log(JSON.stringify({ event: "shutdown", signal }));
-  server.close(() => process.exit(0));
+  server.close(() => {
+    try { db.close(); } catch {}
+    process.exit(0);
+  });
   // 兜底：长连接（正在播放的流）不阻塞退出
   setTimeout(() => process.exit(0), 5000).unref();
 }

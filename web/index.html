@@ -6,10 +6,20 @@
 <title>红果短剧 · 网页版</title>
 <link rel="stylesheet" href="/style.css" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8D%92%3C/text%3E%3C/svg%3E" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#0b0d12" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="红果短剧" />
 </head>
 <body>
 <header class="topbar">
   <div class="brand" id="brand">🍒 <span>红果短剧</span></div>
+  <nav class="nav">
+    <button id="btnHome" class="navbtn active">首页</button>
+    <button id="btnRecommend" class="navbtn">🔥 推荐</button>
+  </nav>
   <div class="searchbox">
     <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
     <button id="btnSearch" class="btn">搜索</button>
@@ -19,15 +29,22 @@
     <button id="btnImport" class="btn ghost" title="导入糖葫芦风格 JS 源">＋源</button>
     <button id="btnManage" class="btn ghost" title="源管理：启用 / 日志 / 删除">⚙ 源</button>
     <button id="btnHistory" class="btn ghost" title="观看历史">🕘 历史</button>
+    <button id="btnFavs" class="btn ghost" title="我的收藏">☆ 收藏</button>
+    <button id="btnFollows" class="btn ghost" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
+    <button id="btnAccount" class="btn ghost" title="登录 / 注册（多设备同步）">登录</button>
   </div>
 </header>
 
 <main id="main">
-  <div id="chips" class="chips"></div>
-  <div id="notice" class="notice hidden"></div>
-  <div id="grid" class="grid"></div>
-  <div class="morebar"><button id="btnMore" class="btn ghost hidden">加载更多</button></div>
-  <div id="empty" class="empty hidden"></div>
+  <div id="content">
+    <div id="chips" class="chips"></div>
+    <div id="notice" class="notice hidden"></div>
+    <div id="grid" class="grid"></div>
+    <div class="morebar"><button id="btnMore" class="btn ghost hidden">加载更多</button></div>
+    <div id="sentinel" class="sentinel" aria-hidden="true"></div>
+    <div id="autoMore" class="automore hidden">正在加载更多…</div>
+    <div id="empty" class="empty hidden"></div>
+  </div>
 </main>
 
 <section id="detail" class="detail hidden">
@@ -38,6 +55,10 @@
       <h2 id="dTitle"></h2>
       <div id="dMeta" class="dmeta"></div>
       <p id="dDesc" class="ddesc"></p>
+      <div id="dActions" class="dacts">
+        <button id="dFav" class="btn ghost mini">☆ 收藏</button>
+        <button id="dFollow" class="btn ghost mini">🔔 追更</button>
+      </div>
     </div>
   </div>
   <div id="dResume" class="resume hidden"></div>
@@ -98,6 +119,47 @@
     <div class="modal-actions">
       <button id="btnHistClear" class="btn ghost danger">清空历史</button>
       <button id="btnHistClose" class="btn ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="authModal" class="modal hidden">
+  <div class="modal-box narrow">
+    <h3 id="authTitle">登录</h3>
+    <div class="authtabs">
+      <button id="tabLogin" class="navbtn active">登录</button>
+      <button id="tabRegister" class="navbtn">注册</button>
+    </div>
+    <p class="hint">账号数据（观看历史、收藏、追剧）保存在服务端 SQLite，多设备登录后自动同步。</p>
+    <label class="lbl">用户名</label>
+    <input id="authUser" class="input" maxlength="20" autocomplete="username" placeholder="3–20 位中文、字母、数字或下划线" />
+    <label class="lbl">密码</label>
+    <input id="authPass" class="input" type="password" maxlength="64" autocomplete="current-password" placeholder="至少 6 位" />
+    <div class="modal-actions">
+      <button id="btnAuthCancel" class="btn ghost">取消</button>
+      <button id="btnAuthOk" class="btn">登录</button>
+    </div>
+    <div id="authMsg" class="impmsg"></div>
+  </div>
+</div>
+
+<div id="favModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>我的收藏</h3>
+    <p class="hint">收藏保存在服务端，换设备登录后依然在。</p>
+    <div id="favList" class="histlist"></div>
+    <div class="modal-actions"><button id="btnFavClose" class="btn ghost">关闭</button></div>
+  </div>
+</div>
+
+<div id="followModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>追剧提醒</h3>
+    <p class="hint">追更的剧集有新集时会在这里提示（打开页面和每隔 10 分钟自动检查）。</p>
+    <div id="followList" class="histlist"></div>
+    <div class="modal-actions">
+      <button id="btnFollowCheck" class="btn ghost">立即检查更新</button>
+      <button id="btnFollowClose" class="btn ghost">关闭</button>
     </div>
   </div>
 </div>

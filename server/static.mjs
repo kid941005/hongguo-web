@@ -16,6 +16,7 @@ const MIME = {
   ".ico": "image/x-icon",
   ".woff2": "font/woff2",
   ".map": "application/json",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 // 静态资源托管：只允许 webDir 之内的文件，路径逃逸一律 404（不泄露目录是否存在）。

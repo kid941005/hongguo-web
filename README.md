@@ -21,7 +21,7 @@
 ```bash
 git clone https://github.com/kid941005/hongguo-web.git
 cd hongguo-web
-docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.2.1
+docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.3.0
 ```
 
 首次会拉取镜像，并创建容器 `hongguo-web` 与命名卷 `hongguo-data`。浏览器打开 <http://localhost:8787> 即可。端口、访问口令等全部直接写在 [compose.yaml](compose.yaml) 里，需要调整就先改再启动（见 1.4）。
@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.2.1","active":"hongguo","sources":5}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.3.0","active":"hongguo","sources":5,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -56,7 +56,7 @@ curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"v
 ```yaml
 services:
   hongguo-web:
-    image: ghcr.io/kid941005/hongguo-web:0.2.1
+    image: ghcr.io/kid941005/hongguo-web:0.3.0
     ports: ["8787:8787"]
     environment:
       TOKEN: ""                      # 需要访问口令就填
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:0.2.1   # 也可换成 :latest
+  ghcr.io/kid941005/hongguo-web:0.3.0   # 也可换成 :latest
 ```
 
 参数与 [compose.yaml](compose.yaml) 完全一致（同样的端口、环境变量、卷与安全加固），只是不经过 compose。
@@ -125,7 +125,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | --- | --- | --- |
 | `PORT` | `8787` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
-| `DATA_DIR` | `/app/data` | 配置 + 用户源目录（需可写） |
+| `DATA_DIR` | `/app/data` | 配置、用户源与账号数据库（`hongguo.db`）目录（需可写，建议挂持久卷） |
 | `SOURCES_DIR` | `/app/sources/builtin` | 内置源目录 |
 | `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住 |
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
@@ -137,18 +137,25 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会并发查询所有源并按源交错合并，卡片左上角带源名徽标；点开卡片时自动带上它所属的源。顶部提示条会列出每个源命中多少条、哪些源失败。
 - **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。
 - **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。
+- **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
+- **无限滚动**：首页、分类、搜索结果和推荐页滑到底部会自动加载下一页；「加载更多」按钮仍保留作为兜底（自动加载不可用时手动点）。
 - **搜索**：输入关键词回车。红果内置源的官方搜索接口被风控，会自动降级为「首页推荐池检索」（结果偏少，界面会提示）；JS 源走各自搜索接口，完整可用。
 - **播放**：点卡片 → 详情页选集。多线路时先选线路。播放器支持 HLS（m3u8，含多码率清晰度切换）与 MP4 直链；FLV 没有对应播放器，源里返回 flv 会播不了。
-- **观看历史 / 续播**：播放进度存在浏览器 localStorage（每 5 秒、暂停、关闭播放器时落盘，上限 100 条）。详情页顶部会出现「上次看到 第N集 12:34 / 20:50（60%）」续播条，点「继续播放」直接跳到上次的位置；已看过的集在选集区变暗，当前集高亮。顶栏「🕘 历史」可查看/续播/删除记录或清空。
+- **账号（可选）**：顶栏「登录」注册/登录（用户名 3–20 位中英文数字下划线，密码 6–64 位）。账号只用来同步下面的个人数据，不登录也能正常看剧。
+- **观看历史 / 续播**：播放进度会记住（每 5 秒、暂停、关闭播放器时落盘，上限 100 条）。详情页顶部出现「上次看到 第N集 12:34 / 20:50（60%）」续播条，点「继续播放」直接跳到上次位置；已看过的集变暗、当前集高亮。顶栏「🕘 历史」可查看/续播/删除/清空。登录后历史同步到服务端，换设备登录同一账号即可接着看。
+- **收藏 / 追剧提醒**：详情页「☆ 收藏」「🔔 追更」；顶栏「☆ 收藏」「🔔 追剧」打开列表。追更会定时（默认 10 分钟，打开面板或页面重新可见时也会）检查集数变化，有新集时角标显示新增集数并弹出提示，面板里点「检查更新」可立即检查。
+- **多设备同步**：历史、收藏、追更都存在服务端 SQLite（`DATA_DIR/hongguo.db`）。本地历史与服务端按时间戳取新合并，旧进度不会覆盖新进度。
+- **PWA（装到桌面/手机主屏）**：Chrome/Edge 地址栏右侧会出现「安装」；手机浏览器「添加到主屏幕」后以独立窗口运行。Service Worker 需要安全上下文（`http://localhost` 或 HTTPS），用局域网 IP 的纯 HTTP 打开时页面可用但没有离线缓存、不能安装。
 - **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，选择记在 localStorage）、清晰度切换（仅 HLS 多码率源出现，单码率自动隐藏）、全屏（按钮 / 双击画面 / F 键）。
-- **深链**：`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
+- **深链**：`/?rec=1`（直接打开推荐页）、`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
 
 ## 3.1 前端存储
 
 | key | 位置 | 内容 |
 | --- | --- | --- |
-| `hg_watch_v1` | 浏览器 localStorage | 观看历史（source/id/title/cover/lineIdx/epIdx/pos/dur/at），最多 100 条，不上传服务器 |
+| `hg_watch_v1` | 浏览器 localStorage | 观看历史（source/id/title/cover/lineIdx/epIdx/pos/dur/at），最多 100 条；登录后同步到服务端（未登录只存本地） |
 | `hg_rate_v1` | 浏览器 localStorage | 上次选择的播放倍速 |
+| `hg_user_token` | 浏览器 localStorage | 登录令牌（30 天有效），退出登录即清除 |
 
 ## 3.2 播放器快捷键
 
@@ -181,13 +188,15 @@ hongguo-web/
 │  ├─ stream.mjs           # /api/stream 内置解密流（Range + 并发上限）
 │  ├─ static.mjs           # 静态文件托管（越界校验、MIME、HEAD）
 │  ├─ errors.mjs           # 错误码 → HTTP 状态映射与对外文案
+│  ├─ db.mjs               # SQLite（node:sqlite）：用户/令牌/历史/收藏/追更
+│  ├─ users.mjs            # 账号与个人数据读写（UserStore）
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
 │  └─ sources/
 │     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时（node:vm）
 │     ├─ manager.mjs       # 源的扫描/安装/删除/启用
 │     └─ shims.js          # fetch/HTML 解析垫片（对齐 App 内 CatPaw 运行时）
 ├─ sources/builtin/        # 内置 JS 源：qimao / xifan / template / maccms
-└─ web/                    # 前端静态页 + hls.js
+└─ web/                    # 前端静态页 + hls.js + PWA（manifest / sw.js / icons/）
 ```
 
 ## 5. 自定义 JS 源格式（糖葫芦同款）
@@ -232,13 +241,25 @@ var spider = {
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/health` | 健康检查 |
+| GET | `/health` | 健康检查（含 `accounts` 是否启用账号系统） |
+| POST | `/api/auth/register` | 注册：`{ "username": "…", "password": "…" }` → `{ token, user }` |
+| POST | `/api/auth/login` | 登录：同上 → `{ token, user }` |
+| POST | `/api/auth/logout` | 注销当前令牌 |
+| GET | `/api/auth/me` | 当前用户 |
+| GET/PUT/DELETE | `/api/me/history` | 云端观看历史：GET 列表 / PUT 上报一条 / DELETE 清空 |
+| DELETE | `/api/me/history/:source/:id` | 删除一条历史 |
+| GET/POST | `/api/me/favorites` | 收藏列表 / 新增（`{source,id,title,cover,remarks}`） |
+| DELETE | `/api/me/favorites/:source/:id` | 取消收藏 |
+| GET/POST | `/api/me/follows` | 追剧列表 / 新增（`{source,id,title,cover}`） |
+| DELETE | `/api/me/follows/:source/:id` | 取消追剧 |
+| GET | `/api/me/follows/updates?force=1` | 检查追更（默认 10 分钟节流），返回 `{updates:[{source,id,title,added,epCount}],follows}` |
 | GET | `/api/sources` | 源列表 + 当前启用源 |
 | POST | `/api/sources/import` | 导入源：`{ "url": "…" }` 或 `{ "code": "…" }` |
 | POST | `/api/sources/active` | 切换启用源：`{ "id": "qimao" }` |
 | GET | `/api/sources/:id/log` | 源最近运行日志 |
 | DELETE | `/api/sources/:id` | 删除用户源（内置源不可删） |
 | GET | `/api/home?source=&page=` | 首页（`classes` + `items`） |
+| GET | `/api/recommend?page=` | 推荐页：内置红果四榜单按真实评分合并排序（`items[].score/heat/bang`） |
 | GET | `/api/category?source=&tid=&page=` | 分类列表 |
 | GET | `/api/search?source=&q=&page=` | 搜索；`source=__all`（或 `all=1`）为多源聚合，返回 `{aggregate:true, groups:[{source,name,count,ms,hasMore,error}]}` |
 | GET | `/api/detail?source=&id=` | 详情（含线路与剧集） |
@@ -247,7 +268,9 @@ var spider = {
 | GET | `/api/hls?u=&r=` | HLS 清单重写（分片走 `/api/media`） |
 | GET/HEAD | `/api/stream/:epId` | 内置红果分集流（服务端解密 + Range） |
 
-所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON`（400）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
+个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需要登录，请求头带 `X-Auth-Token: <token>`；应用级 `TOKEN` 仍走 `Authorization: Bearer`。
+
+所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
 
 ## 7. 已知限制
 
@@ -255,8 +278,10 @@ var spider = {
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
 - **红果内置流是 HEVC 1080×1920**：需要浏览器支持 HEVC/H.265 解码（Edge、Chrome 在支持硬解的机器上正常，实测 Edge 可直接播放）；缺 HEVC 支持的环境会黑屏或报解码错误，可改用 JS 源。
-- **观看历史仅存本地**：换浏览器/清缓存即丢失，多设备不同步（没有账号体系）。
+- **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
+- **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
 - **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。
+- **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
 - 仅供个人学习与自用；内容版权归各平台所有，请勿用于商业分发。
 
@@ -264,9 +289,9 @@ var spider = {
 
 首页与播放器（全屏）：
 
-| 首页 | 全屏播放 |
-| --- | --- |
-| ![首页](docs/screenshots/home.png) | ![全屏](docs/screenshots/fullscreen.png) |
+| 首页 | 推荐页 | 全屏播放 | 手机端 |
+| --- | --- | --- | --- |
+| ![首页](docs/screenshots/home.png) | ![推荐](docs/screenshots/recommend.png) | ![全屏](docs/screenshots/fullscreen.png) | ![手机端](docs/screenshots/mobile.png) |
 
 ## 9. 许可
 
