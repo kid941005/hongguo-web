@@ -21,11 +21,10 @@
 ```bash
 git clone https://github.com/kid941005/hongguo-web.git
 cd hongguo-web
-cp .env.example .env        # 可选：改端口、访问口令等；不改也能直接起
 docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.2.1
 ```
 
-首次会拉取镜像，并创建容器 `hongguo-web` 与命名卷 `hongguo-data`。浏览器打开 <http://localhost:8787> 即可。
+首次会拉取镜像，并创建容器 `hongguo-web` 与命名卷 `hongguo-data`。浏览器打开 <http://localhost:8787> 即可。端口、访问口令等全部直接写在 [compose.yaml](compose.yaml) 里，需要调整就先改再启动（见 1.4）。
 
 ### 1.3 确认部署成功
 
@@ -37,17 +36,18 @@ curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"v
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
 
-### 1.4 改配置（都写在 .env）
+### 1.4 改配置（直接改 compose.yaml）
+
+不需要 `.env`，所有值都在 [compose.yaml](compose.yaml) 里，改完执行 `docker compose up -d` 生效。
 
 | 需求 | 做法 |
 | --- | --- |
-| 换宿主机端口 | `.env` 里改 `APP_PORT=9000`（容器内 `PORT` 跟随联动，映射为 `9000:8787`） |
-| 加访问口令 | `.env` 里填 `TOKEN=你的口令`；浏览器首次访问 `http://<host>:8787/?token=你的口令`，之后前端会记住 |
-| 放大并发播放 | `.env` 里 `MAX_STREAMS=12` |
-| 允许代理内网媒体 | `.env` 里 `ALLOW_PRIVATE_MEDIA=1`（默认 0 拒绝，防 SSRF） |
-| 改时区 | `.env` 里 `TZ=Asia/Shanghai` |
-
-改完执行 `docker compose up -d` 生效。`.env` 已在 `.gitignore` 里；模板与默认值见 [.env.example](.env.example)，完整服务定义见 [compose.yaml](compose.yaml)。
+| 换宿主机端口 | `ports` 改成 `"9000:8787"`（左边是宿主机端口，右边是容器端口） |
+| 连容器端口一起换 | 同时把 `environment.PORT` 与 `ports` 右边改成同一个值（如都改 9000） |
+| 加访问口令 | `environment.TOKEN: "你的口令"`；浏览器首次访问 `http://<host>:8787/?token=你的口令`，之后前端会记住 |
+| 放大并发播放 | `environment.MAX_STREAMS: "12"` |
+| 允许代理内网媒体 | `environment.ALLOW_PRIVATE_MEDIA: "1"`（默认 `"0"` 拒绝，防 SSRF） |
+| 改时区 | `environment.TZ: "Asia/Shanghai"` |
 
 ### 1.5 不克隆代码，直接跑
 
@@ -98,6 +98,8 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 
 ## 2. 环境变量
 
+以下变量都在 [compose.yaml](compose.yaml) 的 `environment` 里设置（不使用 `.env`）；从源码直接跑时也可用同名环境变量覆盖。
+
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8787` | 监听端口 |
@@ -145,7 +147,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 
 ```
 hongguo-web/
-├─ Dockerfile / compose.yaml / .dockerignore / .env.example
+├─ Dockerfile / compose.yaml / .dockerignore
 ├─ LICENSE                 # GPL-3.0 全文
 ├─ .github/workflows/docker.yml  # 镜像构建工作流（GHCR，main→:edge，tag→:版本+:latest）
 ├─ docs/                   # research.md（上游调研）+ screenshots/

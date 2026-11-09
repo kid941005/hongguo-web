@@ -1,6 +1,5 @@
 node_modules/
 data/
-.env
 .dsh-project-memory/
 .tmp/
 *.log
