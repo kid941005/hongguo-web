@@ -46,7 +46,7 @@ docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
   ghcr.io/kid941005/hongguo-web:latest
 ```
 
-若拉取提示无权限（包默认私有），在仓库的 Package 设置里把可见性改成 Public，或先 `docker login ghcr.io`。
+GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + linux/arm64）；若遇拉取限流或私有仓库，先 `docker login ghcr.io` 再拉。
 
 ## 2. 环境变量
 
