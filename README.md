@@ -9,48 +9,85 @@
 - 后端：Node.js（ESM），无数据库；源与配置落在 `DATA_DIR`
 - 容器：`node:22-bookworm-slim`，非 root 运行，`read_only` + `cap_drop: ALL` 加固
 
-## 1. 快速开始（Docker）
+## 1. 快速开始（docker compose）
+
+### 1.1 前置条件
+
+- Docker Engine 20.10+ 或 Docker Desktop（自带 `docker compose` v2）：`docker compose version` 能输出版本即可
+- 能访问 `ghcr.io`：镜像已设为 Public，直接拉取无需登录（拉取慢可先 `docker login ghcr.io`，或走 1.6 从源码构建）
+
+### 1.2 三步启动
 
 ```bash
 git clone https://github.com/kid941005/hongguo-web.git
 cd hongguo-web
-cp .env.example .env        # 可选：改端口、访问口令等
+cp .env.example .env        # 可选：改端口、访问口令等；不改也能直接起
 docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.2.1
 ```
 
-打开 <http://localhost:8787>。
+首次会拉取镜像，并创建容器 `hongguo-web` 与命名卷 `hongguo-data`。浏览器打开 <http://localhost:8787> 即可。
 
-容器名 `hongguo-web`、命名卷 `hongguo-data`、以及 compose 里全部环境变量都在 [compose.yaml](compose.yaml) 里。示例：
+### 1.3 确认部署成功
+
+```bash
+docker compose ps                        # STATUS 里应出现 running (healthy)
+docker compose logs -f                   # 实时日志，Ctrl+C 退出
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.2.1","active":"hongguo","sources":5}
+```
+
+`healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
+
+### 1.4 改配置（都写在 .env）
 
 | 需求 | 做法 |
 | --- | --- |
 | 换宿主机端口 | `.env` 里改 `APP_PORT=9000`（容器内 `PORT` 跟随联动，映射为 `9000:8787`） |
-| 加访问口令 | `.env` 里填 `TOKEN=你的口令`；浏览器首次访问 `http://<host>:8787/?token=你的口令` |
+| 加访问口令 | `.env` 里填 `TOKEN=你的口令`；浏览器首次访问 `http://<host>:8787/?token=你的口令`，之后前端会记住 |
 | 放大并发播放 | `.env` 里 `MAX_STREAMS=12` |
 | 允许代理内网媒体 | `.env` 里 `ALLOW_PRIVATE_MEDIA=1`（默认 0 拒绝，防 SSRF） |
-| 从源码构建镜像 | 把 `compose.yaml` 的 `image:` 注释掉、取消 `build: .` 的注释，然后 `docker compose up -d --build` |
+| 改时区 | `.env` 里 `TZ=Asia/Shanghai` |
 
-`.env` 已在 `.gitignore` 里，不会被提交；模板见 [.env.example](.env.example)。
+改完执行 `docker compose up -d` 生效。`.env` 已在 `.gitignore` 里；模板与默认值见 [.env.example](.env.example)，完整服务定义见 [compose.yaml](compose.yaml)。
 
-源与配置保存在命名卷 `hongguo-data`（容器内 `/app/data`），升级/重建不丢：
+### 1.5 不克隆代码，直接跑
 
-```bash
-docker compose down          # 停掉容器，数据卷保留
-docker compose up -d         # 重新启动（镜像模式会拉取最新镜像；源码模式加 --build）
+任意空目录里新建 `compose.yaml`，粘最小示例，然后 `docker compose up -d`：
+
+```yaml
+services:
+  hongguo-web:
+    image: ghcr.io/kid941005/hongguo-web:0.2.1
+    ports: ["8787:8787"]
+    environment:
+      TOKEN: ""                      # 需要访问口令就填
+    volumes: ["hongguo-data:/app/data"]
+    restart: unless-stopped
+volumes:
+  hongguo-data:
 ```
 
-### 不用 compose
+### 1.6 从源码构建 / 不用 compose
+
+要从源码构建镜像：把 `compose.yaml` 的 `image:` 注释掉、取消 `build: .` 的注释，再 `docker compose up -d --build`。
+
+完全不用 compose 也可以：
 
 ```bash
 docker build -t hongguo-web .
 docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data hongguo-web
 ```
 
-### 直接用现成镜像（GHCR）
+### 1.7 升级与停止
 
-仓库自带镜像构建工作流 [.github/workflows/docker.yml](.github/workflows/docker.yml)：push 到 `main` 推 `:edge`，打 `v*` 标签同时推 `:版本` 与 `:latest`，多架构 linux/amd64 + linux/arm64，层缓存走 GHA。构建完成后在 Actions 页可见，镜像发布在 GitHub Packages。
+```bash
+docker compose pull && docker compose up -d   # 换了 tag 或镜像有更新时重建（数据保留）
+docker compose down                           # 停止并删除容器，数据卷保留
+docker compose down -v                        # 连数据卷一起删（会丢失导入的源与配置）
+```
 
-镜像发布后：
+### 1.8 镜像从哪来（GHCR）
+
+镜像由仓库自带的构建工作流 [.github/workflows/docker.yml](.github/workflows/docker.yml) 产出：push 到 `main` 推 `:edge`，打 `v*` 标签同时推 `:版本` 与 `:latest`，多架构 `linux/amd64` + `linux/arm64`，层缓存走 GHA。构建记录见 Actions 页，镜像在 GitHub Packages。也可以直接：
 
 ```bash
 docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
