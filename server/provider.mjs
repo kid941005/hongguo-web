@@ -19,6 +19,7 @@ const context = vm.createContext({
   URL,
   URLSearchParams,
   axios: axios.create({
+    timeout: 30000,
     maxContentLength: 16 * 1024 * 1024,
     maxBodyLength: 1024 * 1024,
   }),
@@ -52,6 +53,15 @@ let recommendPool = null;
 let recommendPoolAt = 0;
 let recommendPoolPending = null;
 
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+    if (timer && timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const rankCard = (row) => ({
   id: String(row.url || ""),
   title: String(row.title || ""),
@@ -77,10 +87,10 @@ async function buildRecommendPool() {
     while (cursor < jobs.length) {
       const [route, page] = jobs[cursor++];
       try {
-        const data = await api.rankPageRich(route, page);
+        const data = await withTimeout(api.rankPageRich(route, page), 20000, "榜单页超时");
         for (const item of data.list) rows.push(item);
       } catch {
-        /* 单页失败忽略 */
+        /* 单页失败/超时忽略 */
       }
     }
   };

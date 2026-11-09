@@ -37,6 +37,12 @@ function toItems(list) {
   return (Array.isArray(list) ? list : []).map(normVod).filter(Boolean);
 }
 
+// 兼容源返回数组或 { list: [] } 两种写法（README 两种都允许）。
+function listOf(result) {
+  if (Array.isArray(result)) return result;
+  return result && Array.isArray(result.list) ? result.list : [];
+}
+
 // vod_play_url: 线路用 $$$ 分隔，集用 # 分隔，每集「集名$集ID」
 function splitPlayUrl(vodPlayUrl, vodPlayFrom) {
   const urlStr = String(vodPlayUrl || "");
@@ -144,7 +150,8 @@ export function createCatalog({ provider, sources }) {
     const entry = entryOf(sourceId);
     const pageNo = Number(page) || 1;
     if (entry.type === "builtin") {
-      const items = toItems((await provider.home(pageNo)).items);
+      const data = await withTimeout(provider.home(pageNo), 30000, "首页加载超时");
+      const items = toItems(data.items);
       return { source: entry.id, kind: "builtin", classes: [], items, page: pageNo, hasMore: items.length >= 20 };
     }
     const runtime = sources.runtime(entry.id);
@@ -154,13 +161,13 @@ export function createCatalog({ provider, sources }) {
         .filter((c) => c && (c.type_id !== undefined || c.id !== undefined))
         .map((c) => ({ id: String(pick(c.type_id, c.id)), name: String(pick(c.type_name, c.name)) }))
       : [];
-    let items = toItems(result && result.list);
+    let items = toItems(listOf(result));
     // 多数 JS 源的 home 只给分类、把列表放在 category 里（官方 hongguo.js 也是如此）。
     // 这里兜底取第一个分类的第一页，避免切到这类源时首页一片空白。
     if (!items.length && classes.length) {
       try {
         const first = await runtime.call("category", [classes[0].id, 1, {}, {}], TIMEOUT_HOME);
-        items = toItems(first && first.list);
+        items = toItems(listOf(first));
       } catch {
         items = []; // 兜底失败只影响首页推荐位，分类照常可用
       }
@@ -172,7 +179,7 @@ export function createCatalog({ provider, sources }) {
       items,
       page: 1,
       hasMore: false,
-      filters: (result && result.filters) || {},
+      filters: (result && !Array.isArray(result) && result.filters) || {},
     };
   }
 
@@ -180,11 +187,12 @@ export function createCatalog({ provider, sources }) {
     const entry = entryOf(sourceId);
     const pageNo = Number(page) || 1;
     if (entry.type === "builtin") {
-      const items = toItems((await provider.home(pageNo)).items);
+      const data = await withTimeout(provider.home(pageNo), 30000, "分类加载超时");
+      const items = toItems(data.items);
       return { source: entry.id, tid, items, page: pageNo, hasMore: items.length >= 20, classes: [] };
     }
     const result = await sources.runtime(entry.id).call("category", [String(tid), pageNo, {}, extend || {}], TIMEOUT_HOME);
-    const items = toItems(result && result.list);
+    const items = toItems(listOf(result));
     const current = Number(result && result.page) || pageNo;
     const pageCount = Number(result && result.pagecount) || 0;
     return {
@@ -199,10 +207,11 @@ export function createCatalog({ provider, sources }) {
   async function search(sourceId, keyword, page) {
     const entry = entryOf(sourceId);
     const pageNo = Number(page) || 1;
-    if (entry.type === "builtin") return builtinSearch(keyword, pageNo);
+    if (entry.type === "builtin")
+      return withTimeout(builtinSearch(keyword, pageNo), 30000, "内置源检索超时");
 
     const result = await sources.runtime(entry.id).call("search", [keyword, false, pageNo], TIMEOUT_SEARCH);
-    const items = toItems(result && result.list);
+    const items = toItems(listOf(result));
     const current = Number(result && result.page) || pageNo;
     const pageCount = Number(result && result.pagecount) || 0;
     return {
@@ -216,7 +225,7 @@ export function createCatalog({ provider, sources }) {
   async function detail(sourceId, id) {
     const entry = entryOf(sourceId);
     if (entry.type === "builtin") {
-      const data = await provider.detail(String(id));
+      const data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");
       const episodes = (data.episodes || []).map((ep) => ({ id: String(ep.id), name: ep.title }));
       return {
         source: entry.id,
@@ -231,8 +240,14 @@ export function createCatalog({ provider, sources }) {
     }
 
     const result = await sources.runtime(entry.id).call("detail", [String(id)], TIMEOUT_HOME);
-    const vod = Array.isArray(result && result.list) ? result.list[0] : null;
-    const norm = normVod(vod);
+    const vod = Array.isArray(result)
+      ? result[0]
+      : result && Array.isArray(result.list)
+        ? result.list[0]
+        : null;
+    const norm = normVod(
+      vod && typeof vod === "object" ? { ...vod, vod_id: pick(vod.vod_id, vod.id, vod.vid, id) } : null,
+    );
     if (!norm) throw fail("EMPTY", "详情为空");
     const lines = splitPlayUrl(vod.vod_play_url, vod.vod_play_from);
     return {
@@ -263,14 +278,18 @@ export function createCatalog({ provider, sources }) {
     } else if (out && typeof out === "object") {
       if (out.parse && Number(out.parse) !== 0)
         throw fail("NEED_PARSE", "该源需要 webview 嗅探解析（parse=1），网页版无法直接播放");
-      url = String(pick(out.url, out.playUrl, out.play_url));
-      headers = out.header || out.headers || {};
+      const rawUrl = pick(out.url, out.playUrl, out.play_url);
+      url = rawUrl == null ? "" : String(rawUrl).trim();
+      const rawHeaders = out.header || out.headers;
+      headers = rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders) ? rawHeaders : {};
     }
     if (!url) throw fail("NO_URL", "该集没有可用播放地址");
     if (/^[0-9a-f]{32}$/i.test(url)) throw fail("ENCRYPTED", "该源返回加密标识而非播放地址，网页版暂不支持");
+    // 很多源返回协议相对地址（//cdn/x.m3u8），浏览器能识别但服务端 new URL 会失败。
+    if (url.startsWith("//")) url = "https:" + url;
 
     const type = classifyUrl(url);
-    const referer = headers.Referer || headers.referer || "";
+    const referer = headers.Referer || headers.referer || headers.REFERER || "";
     const encoded = encodeURIComponent(url);
     const proxyBase = type === "hls" ? "/api/hls?u=" : "/api/media?u=";
     return {
@@ -339,7 +358,7 @@ export function createCatalog({ provider, sources }) {
   // 推荐页：红果各榜单按真实评分合并后的稳定列表，按页切分给前端。
   async function recommend(page = 1) {
     const pageNo = Number(page) || 1;
-    const pool = await provider.recommendPool();
+    const pool = await withTimeout(provider.recommendPool(), 45000, "推荐加载超时");
     const start = (pageNo - 1) * RECOMMEND_PER_PAGE;
     const slice = pool.slice(start, start + RECOMMEND_PER_PAGE);
     return {

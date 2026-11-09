@@ -2,6 +2,15 @@ import { fail } from "./errors.mjs";
 
 const CHUNK = 1024 * 1024;
 
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(fail("TIMEOUT", message)), ms);
+    if (timer && timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // 解析 Range 头；非法或不满足返回 null（调用方回 416）。
 export function byteRange(value, total) {
   if (!value) return [0, total - 1];
@@ -25,7 +34,7 @@ export function createStreamHandler({ provider, limit = 6 }) {
 
     active++;
     try {
-      const stream = await provider.stream(epId);
+      const stream = await withTimeout(provider.stream(epId), 30000, "视频流初始化超时");
       const range = byteRange(req.headers.range, stream.total);
       if (!range) {
         res.writeHead(416, { "content-range": "bytes */" + stream.total });

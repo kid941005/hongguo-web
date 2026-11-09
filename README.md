@@ -6,7 +6,7 @@
 一个可自托管的短剧网页播放器：自带「红果短剧」内置源（服务端解密直链播放，无需客户端），并预留与**糖葫芦（THLRedGuo / CatPaw）同款格式的 JS 源**接口——把单文件 `spider` 源丢进来即可多源聚合。
 
 - 前端：原生 JS 单页（暗色响应式），HLS 由内置 hls.js 播放，MP4 直连
-- 后端：Node.js（ESM），无数据库；源与配置落在 `DATA_DIR`
+- 后端：Node.js（ESM），账号数据存 SQLite（`node:sqlite`）；源与配置落在 `DATA_DIR`
 - 容器：`node:22-bookworm-slim`，非 root 运行，`read_only` + `cap_drop: ALL` 加固
 
 ## 1. 快速开始（docker compose）
@@ -44,7 +44,7 @@ curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"v
 | --- | --- |
 | 换宿主机端口 | `ports` 改成 `"9000:8787"`（左边是宿主机端口，右边是容器端口） |
 | 连容器端口一起换 | 同时把 `environment.PORT` 与 `ports` 右边改成同一个值（如都改 9000） |
-| 加访问口令 | `environment.TOKEN: "你的口令"`；浏览器首次访问 `http://<host>:8787/?token=你的口令`，之后前端会记住 |
+| 加访问口令 | `environment.TOKEN: "你的口令"`；浏览器首次访问 `http://<host>:8787/?token=你的口令`，之后前端会记住，播放/封面等媒体地址也会自动带 `?token=` |
 | 放大并发播放 | `environment.MAX_STREAMS: "12"` |
 | 允许代理内网媒体 | `environment.ALLOW_PRIVATE_MEDIA: "1"`（默认 `"0"` 拒绝，防 SSRF） |
 | 改时区 | `environment.TZ: "Asia/Shanghai"` |
@@ -127,9 +127,10 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `/app/data` | 配置、用户源与账号数据库（`hongguo.db`）目录（需可写，建议挂持久卷） |
 | `SOURCES_DIR` | `/app/sources/builtin` | 内置源目录 |
-| `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住 |
+| `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>` 或 `?token=<TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住，并自动给 `/api/media`、`/api/hls`、`/api/stream` 等媒体地址追加 token |
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
 | `ALLOW_PRIVATE_MEDIA` | 空 | 设为 `1` 时允许 `/api/media`、`/api/hls` 代理内网地址（默认拒绝，防 SSRF） |
+| `ALLOW_PRIVATE_FETCH` | 空 | 设为 `1` 时允许 JS 源脚本 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
 
 ## 3. 使用
 
@@ -188,6 +189,7 @@ hongguo-web/
 │  ├─ stream.mjs           # /api/stream 内置解密流（Range + 并发上限）
 │  ├─ static.mjs           # 静态文件托管（越界校验、MIME、HEAD）
 │  ├─ errors.mjs           # 错误码 → HTTP 状态映射与对外文案
+│  ├─ net.mjs              # 出站 URL 校验（SSRF 防护，供媒体/源/导入复用）
 │  ├─ db.mjs               # SQLite（node:sqlite）：用户/令牌/历史/收藏/追更
 │  ├─ users.mjs            # 账号与个人数据读写（UserStore）
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
@@ -264,13 +266,13 @@ var spider = {
 | GET | `/api/search?source=&q=&page=` | 搜索；`source=__all`（或 `all=1`）为多源聚合，返回 `{aggregate:true, groups:[{source,name,count,ms,hasMore,error}]}` |
 | GET | `/api/detail?source=&id=` | 详情（含线路与剧集） |
 | GET | `/api/play?source=&flag=&id=` | 取播放地址（返回 `{type,url}`） |
-| GET | `/api/media?u=&r=` | 媒体透传（支持 Range，`r` 为 Referer） |
-| GET | `/api/hls?u=&r=` | HLS 清单重写（分片走 `/api/media`） |
-| GET/HEAD | `/api/stream/:epId` | 内置红果分集流（服务端解密 + Range） |
+| GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer，`token` 为应用访问口令） |
+| GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带上 token） |
+| GET/HEAD | `/api/stream/:epId?token=` | 内置红果分集流（服务端解密 + Range） |
 
-个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需要登录，请求头带 `X-Auth-Token: <token>`；应用级 `TOKEN` 仍走 `Authorization: Bearer`。
+个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需要登录，请求头带 `X-Auth-Token: <token>`；应用级 `TOKEN` 支持 `Authorization: Bearer` 或 `?token=`（媒体/流地址由前端自动追加）。
 
-所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
+所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON` / `BAD_URL`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`RATE_LIMITED`（429，注册/登录过于频繁）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
 
 ## 7. 已知限制
 
@@ -283,6 +285,7 @@ var spider = {
 - **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
+- **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。
 - 仅供个人学习与自用；内容版权归各平台所有，请勿用于商业分发。
 
 ## 8. 截图

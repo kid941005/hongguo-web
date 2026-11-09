@@ -1,6 +1,7 @@
 import vm from "node:vm";
 import { htmlShim } from "./shims.js";
 import { fail } from "../errors.mjs";
+import { assertPublicUrl, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 
 // 元信息与核心方法约定，与糖葫芦（THLRedGuo / CatPaw）单文件源保持一致。
 const RE_ID = /\bid\s*:\s*["']([^"']+)["']/;
@@ -23,6 +24,7 @@ export function validateMeta(code) {
   const meta = parseMeta(code);
   const problems = [];
   if (!meta.id) problems.push('缺少 id: "..."');
+  else if (!/^[\w.\-]{1,64}$/.test(meta.id)) problems.push("id 只能包含字母、数字、下划线、点、横线（1–64 位）");
   if (!meta.name) problems.push('缺少 name: "..."');
   if (meta.version && !/^\d{1,9}\.\d{1,9}\.\d{1,9}/.test(meta.version)) problems.push("version 不是 x.y.z 形式");
   if (!/\bspider\b/.test(code)) problems.push("没有 spider 对象");
@@ -39,7 +41,7 @@ function safeJson(value) {
 
 function makeFetch() {
   return async function fetch(input, options = {}) {
-    const url = typeof input === "string" ? input : String((input && input.url) || input);
+    const rawUrl = typeof input === "string" ? input : String((input && input.url) || input);
     const method = String(options.method || "GET").toUpperCase();
     const headers = { ...(options.headers || {}) };
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000;
@@ -47,6 +49,7 @@ function makeFetch() {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      const url = assertPublicUrl(rawUrl, "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）", PRIVATE_FETCH_ALLOWED);
       let body = options.body;
       if (body && typeof body === "object" && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
         try { body = JSON.stringify(body); } catch { body = String(body); }
@@ -58,6 +61,7 @@ function makeFetch() {
         redirect: options.redirect || "follow",
         signal: controller.signal,
       });
+      assertPublicUrl(response.url || url, "源请求跳转到了内网地址", PRIVATE_FETCH_ALLOWED);
       const buffer = Buffer.from(await response.arrayBuffer());
       const text = buffer.toString("utf8");
       const responseHeaders = {};
@@ -73,6 +77,7 @@ function makeFetch() {
         arrayBuffer: async () => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
       };
     } catch (error) {
+      if (error && error.code === "BAD_URL") throw error;
       const aborted = error && error.name === "AbortError";
       const failure = new Error(aborted ? "网络请求超时" : "网络请求失败");
       failure.code = aborted ? "TIMEOUT" : "HTTP_0";

@@ -24,6 +24,7 @@ function num(value, def = 0) {
 export class UserStore {
   constructor(db) {
     this.db = db;
+    try { this.db.prepare("DELETE FROM auth_tokens WHERE expires_at < ?").run(Date.now()); } catch { /* 清理过期令牌失败不影响启动 */ }
   }
 
   // ---- 账号 ----
@@ -36,9 +37,17 @@ export class UserStore {
     if (exists) throw fail("USER_EXISTS", "用户名已被占用");
     const salt = randomBytes(16).toString("hex");
     const now = Date.now();
-    const info = this.db
-      .prepare("INSERT INTO users (username, phash, salt, created_at) VALUES (?, ?, ?, ?)")
-      .run(name, hashPassword(pass, salt), salt, now);
+    let info;
+    try {
+      info = this.db
+        .prepare("INSERT INTO users (username, phash, salt, created_at) VALUES (?, ?, ?, ?)")
+        .run(name, hashPassword(pass, salt), salt, now);
+    } catch (error) {
+      // 并发注册同名用户时，唯一约束会把竞态暴露到这里，统一转成 409。
+      if (/unique constraint failed:\s*users\.username/i.test(String((error && error.message) || error)))
+        throw fail("USER_EXISTS", "用户名已被占用");
+      throw error;
+    }
     const user = { id: Number(info.lastInsertRowid), username: name };
     return { token: this.issueToken(user.id), user };
   }
@@ -97,7 +106,11 @@ export class UserStore {
     const source = str(item.source, 64);
     const vodId = str(item.id, 128);
     if (!vodId) throw fail("BAD_INPUT", "缺少剧集 id");
-    const at = num(item.at, Date.now()) || Date.now();
+    const at = Math.max(0, Math.floor(num(item.at, Date.now()))) || Date.now();
+    const lineIdx = Math.max(0, Math.floor(num(item.lineIdx)));
+    const epIdx = Math.max(0, Math.floor(num(item.epIdx)));
+    const pos = Math.max(0, num(item.pos));
+    const dur = Math.max(0, num(item.dur));
     this.db.prepare(
       `INSERT INTO history (user_id, source, vod_id, title, cover, line_idx, line_name, ep_idx, ep_name, pos, dur, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -105,8 +118,8 @@ export class UserStore {
          title=excluded.title, cover=excluded.cover, line_idx=excluded.line_idx, line_name=excluded.line_name,
          ep_idx=excluded.ep_idx, ep_name=excluded.ep_name, pos=excluded.pos, dur=excluded.dur, updated_at=excluded.updated_at
        WHERE excluded.updated_at >= history.updated_at`,
-    ).run(userId, source, vodId, str(item.title), str(item.cover, 500), num(item.lineIdx), str(item.lineName),
-      num(item.epIdx), str(item.epName), num(item.pos), num(item.dur), at);
+    ).run(userId, source, vodId, str(item.title), str(item.cover, 500), lineIdx, str(item.lineName),
+      epIdx, str(item.epName), pos, dur, at);
     return { ok: true };
   }
 

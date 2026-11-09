@@ -51,11 +51,35 @@ function pageOf(q) {
   return page;
 }
 
-function requireToken(req, token) {
+function requireToken(req, token, url) {
   const expected = Buffer.from("Bearer " + token);
-  const actual = Buffer.from(req.headers.authorization || "");
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
-    throw fail("UNAUTHORIZED", "服务访问口令不正确");
+  const candidates = [req.headers.authorization || ""];
+  const queryToken = url && url.searchParams.get("token");
+  if (queryToken) candidates.push("Bearer " + queryToken);
+  const ok = candidates.some((value) => {
+    const actual = Buffer.from(value);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  });
+  if (!ok) throw fail("UNAUTHORIZED", "服务访问口令不正确");
+}
+
+// 认证接口的内存滑动窗口限流：默认每个 IP 每分钟 10 次，降低口令爆破风险。
+const RATE_WINDOW = 60 * 1000;
+const RATE_MAX = 10;
+const rateBuckets = new Map();
+function rateLimit(req) {
+  const ip = (req.socket && req.socket.remoteAddress) || "unknown";
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.start >= RATE_WINDOW) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count += 1;
+  if (bucket.count > RATE_MAX) throw fail("RATE_LIMITED", "尝试过于频繁，请稍后再试");
+  if (rateBuckets.size > 10000) {
+    for (const [key, value] of rateBuckets) if (now - value.start >= RATE_WINDOW) rateBuckets.delete(key);
+  }
 }
 
 export function createServer({ provider, sources, catalog, users = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
@@ -90,11 +114,13 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     // ---- 账号（注册 / 登录 / 会话） ----
     ["POST", /^\/api\/auth\/register$/, async (ctx) => {
       if (!users) throw fail("NOT_FOUND", "账号系统未启用");
+      rateLimit(ctx.req);
       const body = parseJsonBody(await readBody(ctx.req));
       return ctx.json(200, users.register(body.username, body.password));
     }],
     ["POST", /^\/api\/auth\/login$/, async (ctx) => {
       if (!users) throw fail("NOT_FOUND", "账号系统未启用");
+      rateLimit(ctx.req);
       const body = parseJsonBody(await readBody(ctx.req));
       return ctx.json(200, users.login(body.username, body.password));
     }],
@@ -155,23 +181,30 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
       const u = requireUser(ctx);
       const force = ctx.q.get("force") === "1";
       const now = Date.now();
+      const follows = users.listFollows(u.id);
+      const due = follows.filter((fo) => force || !fo.lastChecked || now - fo.lastChecked >= 10 * 60 * 1000);
       const updates = [];
-      for (const fo of users.listFollows(u.id)) {
-        if (!force && fo.lastChecked && now - fo.lastChecked < 10 * 60 * 1000) continue;
-        let count = 0;
-        try {
-          const d = await catalog.detail(fo.source || undefined, fo.id);
-          count = (d.episodes || []).length || ((d.lines && d.lines[0] && d.lines[0].episodes) || []).length;
-        } catch {
-          continue;
-        }
-        if (count > 0) {
-          if (fo.epCount > 0 && count > fo.epCount) {
-            updates.push({ source: fo.source, id: fo.id, title: fo.title, cover: fo.cover, epCount: count, prevCount: fo.epCount, added: count - fo.epCount });
+      let cursor = 0;
+      // 最多 4 路并发，避免追剧多时逐个串行拖到超时。
+      const worker = async () => {
+        while (cursor < due.length) {
+          const fo = due[cursor++];
+          let count = 0;
+          try {
+            const d = await catalog.detail(fo.source || undefined, fo.id);
+            count = (d.episodes || []).length || ((d.lines && d.lines[0] && d.lines[0].episodes) || []).length;
+          } catch {
+            continue;
           }
-          users.touchFollow(u.id, fo.source, fo.id, count);
+          if (count > 0) {
+            if (fo.epCount > 0 && count > fo.epCount) {
+              updates.push({ source: fo.source, id: fo.id, title: fo.title, cover: fo.cover, epCount: count, prevCount: fo.epCount, added: count - fo.epCount });
+            }
+            users.touchFollow(u.id, fo.source, fo.id, count);
+          }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(4, due.length) }, () => worker()));
       return ctx.json(200, { updates, follows: users.listFollows(u.id) });
     }],
 
@@ -235,7 +268,8 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     ["GET", /^\/api\/hls$/, async ({ req, res, q }) => {
       const target = q.get("u");
       if (!target) throw fail("BAD_INPUT", "缺少 u");
-      await proxyHls(req, res, { url: target, referer: q.get("r") || "" });
+      const accessToken = q.get("token") || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+      await proxyHls(req, res, { url: target, referer: q.get("r") || "", token: accessToken });
     }],
 
     // ---- 内置红果：服务端解密流 ----
@@ -247,7 +281,7 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     const json = (status, value) => sendJson(res, status, value);
     const ctx = { req, res, url, q: url.searchParams, json, params: [] };
 
-    if (token && url.pathname.startsWith("/api/")) requireToken(req, token);
+    if (token && url.pathname.startsWith("/api/")) requireToken(req, token, url);
 
     let pathMatched = false;
     for (const [method, pattern, handler] of routes) {
@@ -266,6 +300,10 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
   }
 
   return http.createServer((req, res) => {
+    // 统一安全响应头（静态页、媒体、流也覆盖）。
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("referrer-policy", "no-referrer");
+    res.setHeader("x-frame-options", "DENY");
     dispatch(req, res).catch((error) => {
       if (res.headersSent) {
         res.destroy();

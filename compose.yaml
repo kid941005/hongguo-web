@@ -26,13 +26,14 @@ services:
       TZ: "Asia/Shanghai"                  # 时区，日志时间用
 
       # ---------- 访问控制 ----------
-      # 填了口令则所有 /api/* 需带 Authorization: Bearer <TOKEN>；
-      # 浏览器首次打开 http://<host>:8787/?token=<TOKEN> 一次，前端会记住。留空=不校验。
+      # 填了口令则所有 /api/* 需带 Authorization: Bearer <TOKEN> 或 ?token=<TOKEN>；
+      # 浏览器首次打开 http://<host>:8787/?token=<TOKEN> 一次，前端会记住，并自动给媒体/流地址追加 token。留空=不校验。
       TOKEN: ""
 
       # ---------- 播放 / 安全 ----------
       MAX_STREAMS: "6"                     # 内置红果解密流的最大并发数
       ALLOW_PRIVATE_MEDIA: "0"             # 1=允许 /api/media、/api/hls 代理内网地址（默认 0 拒绝，防 SSRF）
+      ALLOW_PRIVATE_FETCH: "0"             # 1=允许 JS 源 fetch 与按 URL 导入源访问内网地址（默认 0 拒绝，防 SSRF）
 
     volumes:
       - hongguo-data:/app/data

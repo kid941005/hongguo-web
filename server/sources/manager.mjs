@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { SourceRuntime, parseMeta, validateMeta } from "./runtime.mjs";
 import { fail } from "../errors.mjs";
+import { assertPublicUrl, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 
 const BUILTIN_ID = "hongguo"; // 内置红果解密源：始终存在、不可删除
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -126,12 +127,15 @@ export class SourceManager {
   }
 
   async download(url) {
+    const target = String(url);
+    assertPublicUrl(target, "不允许从内网地址导入源（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）", PRIVATE_FETCH_ALLOWED);
     let response;
     try {
-      response = await fetch(String(url), { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT) });
+      response = await fetch(target, { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT) });
     } catch {
       throw fail("DOWNLOAD", "下载源失败：网络错误或超时");
     }
+    assertPublicUrl(response.url || target, "源地址跳转到了内网地址", PRIVATE_FETCH_ALLOWED);
     if (!response.ok) throw fail("DOWNLOAD", "下载源失败: HTTP " + response.status);
     const declared = Number(response.headers.get("content-length") || 0);
     if (declared > MAX_SOURCE_BYTES) throw fail("TOO_BIG", "源文件过大（>2MB）");
@@ -153,7 +157,14 @@ export class SourceManager {
     if (existing && existing.builtin) throw fail("PROTECTED", "不能覆盖内置源: " + id);
 
     const file = path.join(this.userDir, id.replace(/[^\w.\-]/g, "_") + ".js");
-    fs.writeFileSync(file, source);
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, source);
+    try {
+      fs.renameSync(tmp, file);
+    } catch {
+      try { fs.unlinkSync(file); } catch { /* 目标不存在 */ }
+      fs.renameSync(tmp, file);
+    }
     this.runtimes.delete(id); // 同 id 重新导入：丢掉旧代码的上下文
     this.scan();
 

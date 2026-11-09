@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS follows (
   created_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, source, vod_id)
 );
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_follows_user ON follows(user_id, created_at DESC);
 `;
 
 export function openDb(dataDir) {

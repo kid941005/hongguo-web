@@ -10,7 +10,7 @@
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [],
     loadingMore: false,
-    user: null, token: '', favs: [], follows: []
+    user: null, favs: [], follows: []
   };
 
   // 访问口令：服务端设了 TOKEN 时，前端可用 ?token=xxx 打开一次（会记住），之后自动带上
@@ -25,6 +25,13 @@
     }
     try { tokenCache = localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { tokenCache = ''; }
     return tokenCache;
+  }
+  // 给同源的媒体/流地址补上访问口令：<video>/<img>/hls.js 无法自定义请求头，只能走查询参数。
+  function authUrl(u) {
+    if (!u || u.indexOf('/api/') !== 0) return u;
+    var token = readToken();
+    if (!token || u.indexOf('token=') !== -1) return u;
+    return u + (u.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(token);
   }
   function headers(extra) {
     var out = { 'Accept': 'application/json' };
@@ -124,8 +131,12 @@
   function refreshMe() {
     if (!userToken()) { state.user = null; renderAccount(); return Promise.resolve(null); }
     return api('/api/auth/me').then(function (r) {
-      state.user = r.user; state.token = userToken(); renderAccount(); return state.user;
-    }).catch(function () { state.user = null; setUserToken(''); renderAccount(); return null; });
+      state.user = r.user; renderAccount(); return state.user;
+    }).catch(function (e) {
+      // 只有明确未授权才清登录态，网络抖动不应把用户踢下线。
+      if (e && e.code === 'UNAUTHORIZED') { setUserToken(''); state.user = null; }
+      renderAccount(); return null;
+    });
   }
 
   function openAuth(mode) {
@@ -150,7 +161,7 @@
     var body = { username: username }; body[PW_FIELD] = pw;
     var p = authMode === 'register' ? postJson('/api/auth/register', body) : postJson('/api/auth/login', body);
     p.then(function (r) {
-      setUserToken(r.token); state.user = r.user; state.token = r.token;
+      setUserToken(r.token); state.user = r.user;
       $('authPass').value = '';
       renderAccount(); closeAuth(); toast('欢迎，' + r.user.username);
       return Promise.all([mergeServerHistory(), loadFavs(), loadFollows()]).then(function () { checkUpdates(true, true); });
@@ -394,7 +405,7 @@
     var original = item.cover || '';
     img.src = posterUrl(original);
     img.onerror = function () {
-      if (original && img.src.indexOf('/api/media') === -1) img.src = '/api/media?u=' + encodeURIComponent(original);
+      if (original && img.src.indexOf('/api/media') === -1) img.src = authUrl('/api/media?u=' + encodeURIComponent(original));
       else if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
     };
     var body = document.createElement('div'); body.className = 'cbody';
@@ -598,7 +609,7 @@
       var cover = d.cover || '';
       $('dCover').src = posterUrl(cover);
       $('dCover').onerror = function () {
-        if (cover && $('dCover').src.indexOf('/api/media') === -1) $('dCover').src = '/api/media?u=' + encodeURIComponent(cover);
+        if (cover && $('dCover').src.indexOf('/api/media') === -1) $('dCover').src = authUrl('/api/media?u=' + encodeURIComponent(cover));
         else $('dCover').src = PLACEHOLDER;
       };
       renderLines(d); renderEps(d, 0);
@@ -757,6 +768,7 @@
 
   function openPlayer(url, type, startAt) {
     var v = $('video');
+    url = authUrl(url);
     state.pendingSeek = Math.max(0, Math.floor(startAt || 0));
     state.lastSave = 0;
     state.quality = -1;
@@ -775,8 +787,17 @@
           });
           updateQualityBtn();
         });
+        var recovered = false;
         hls.on(window.Hls.Events.ERROR, function (_e, data) {
-          if (data && data.fatal) { toast('播放失败：' + (data.details || '流错误')); }
+          if (!data || !data.fatal) return;
+          if (!recovered) {
+            recovered = true;
+            if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+            else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+            else recovered = false;
+            if (recovered) { toast('播放异常，正在自动重试…'); return; }
+          }
+          toast('播放失败：' + (data.details || '流错误'));
         });
       } else {
         v.src = url;
