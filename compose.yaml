@@ -9,7 +9,7 @@
 
 services:
   hongguo-web:
-    image: ghcr.io/kid941005/hongguo-web:0.3.0
+    image: ghcr.io/kid941005/hongguo-web:latest
     # build: .
     container_name: hongguo-web
 

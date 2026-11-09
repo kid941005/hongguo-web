@@ -21,7 +21,7 @@
 ```bash
 git clone https://github.com/kid941005/hongguo-web.git
 cd hongguo-web
-docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.3.0
+docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:latest
 ```
 
 首次会拉取镜像，并创建容器 `hongguo-web` 与命名卷 `hongguo-data`。浏览器打开 <http://localhost:8787> 即可。端口、访问口令等全部直接写在 [compose.yaml](compose.yaml) 里，需要调整就先改再启动（见 1.4）。
@@ -56,7 +56,7 @@ curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"v
 ```yaml
 services:
   hongguo-web:
-    image: ghcr.io/kid941005/hongguo-web:0.3.0
+    image: ghcr.io/kid941005/hongguo-web:latest
     ports: ["8787:8787"]
     environment:
       TOKEN: ""                      # 需要访问口令就填
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:0.3.0   # 也可换成 :latest
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.3.0
 ```
 
 参数与 [compose.yaml](compose.yaml) 完全一致（同样的端口、环境变量、卷与安全加固），只是不经过 compose。
