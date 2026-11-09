@@ -4,7 +4,7 @@
 #   1) 用现成镜像（默认）： docker compose up -d
 #   2) 从源码构建：把下面 image: 一行注释掉，取消 build: 的注释，然后 docker compose up -d --build
 #
-# 所有配置都直接写在本文件里（不使用 .env），改完执行 docker compose up -d 生效。
+# 所有配置都直接写在本文件里，改完执行 docker compose up -d 生效。
 # 常用命令： docker compose logs -f   /   docker compose down（保留数据）
 
 services:

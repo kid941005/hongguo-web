@@ -38,7 +38,7 @@ curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"v
 
 ### 1.4 改配置（直接改 compose.yaml）
 
-不需要 `.env`，所有值都在 [compose.yaml](compose.yaml) 里，改完执行 `docker compose up -d` 生效。
+所有值都在 [compose.yaml](compose.yaml) 里，改完执行 `docker compose up -d` 生效。
 
 | 需求 | 做法 |
 | --- | --- |
@@ -74,8 +74,19 @@ volumes:
 
 ```bash
 docker build -t hongguo-web .
-docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data hongguo-web
+docker run -d --name hongguo-web \
+  -p 8787:8787 \
+  -e PORT=8787 -e HOST=0.0.0.0 \
+  -e DATA_DIR=/app/data -e SOURCES_DIR=/app/sources/builtin \
+  -e TZ=Asia/Shanghai -e TOKEN= \
+  -e MAX_STREAMS=6 -e ALLOW_PRIVATE_MEDIA=0 \
+  -v hongguo-data:/app/data \
+  --restart unless-stopped \
+  --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
+  hongguo-web
 ```
+
+上面的端口、8 个环境变量、数据卷和安全选项与 [compose.yaml](compose.yaml) 一一对应（值就是 compose 里的默认值），要改哪项直接改对应的 `-e` 或 `-p`。
 
 ### 1.7 升级与停止
 
@@ -90,15 +101,25 @@ docker compose down -v                        # 连数据卷一起删（会丢�
 镜像由仓库自带的构建工作流 [.github/workflows/docker.yml](.github/workflows/docker.yml) 产出：push 到 `main` 推 `:edge`，打 `v*` 标签同时推 `:版本` 与 `:latest`，多架构 `linux/amd64` + `linux/arm64`，层缓存走 GHA。构建记录见 Actions 页，镜像在 GitHub Packages。也可以直接：
 
 ```bash
-docker run -d --name hongguo-web -p 8787:8787 -v hongguo-data:/app/data \
-  ghcr.io/kid941005/hongguo-web:latest
+docker run -d --name hongguo-web \
+  -p 8787:8787 \
+  -e PORT=8787 -e HOST=0.0.0.0 \
+  -e DATA_DIR=/app/data -e SOURCES_DIR=/app/sources/builtin \
+  -e TZ=Asia/Shanghai -e TOKEN= \
+  -e MAX_STREAMS=6 -e ALLOW_PRIVATE_MEDIA=0 \
+  -v hongguo-data:/app/data \
+  --restart unless-stopped \
+  --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
+  ghcr.io/kid941005/hongguo-web:0.2.1   # 也可换成 :latest
 ```
+
+参数与 [compose.yaml](compose.yaml) 完全一致（同样的端口、环境变量、卷与安全加固），只是不经过 compose。
 
 GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + linux/arm64）；若遇拉取限流或私有仓库，先 `docker login ghcr.io` 再拉。
 
 ## 2. 环境变量
 
-以下变量都在 [compose.yaml](compose.yaml) 的 `environment` 里设置（不使用 `.env`）；从源码直接跑时也可用同名环境变量覆盖。
+以下变量都在 [compose.yaml](compose.yaml) 的 `environment` 里设置；从源码直接跑时也可用同名环境变量覆盖。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
