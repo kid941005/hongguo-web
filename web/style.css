@@ -13,6 +13,7 @@ body{padding-bottom:40px}
   padding:10px 16px;background:rgba(11,13,18,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
 .brand{font-weight:700;font-size:17px;white-space:nowrap;color:#fff}
 .brand span{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand .ver{display:inline-block;margin-left:6px;padding:2px 7px;border:1px solid var(--line);border-radius:999px;background:var(--panel2);color:var(--muted);font-size:10.5px;font-weight:500;line-height:1.4;vertical-align:middle;letter-spacing:.2px;white-space:nowrap}
 .searchbox{flex:1;display:flex;gap:8px;max-width:560px}
 .searchbox input{flex:1;min-width:120px}
 input,textarea,.select{background:var(--panel2);border:1px solid var(--line);color:var(--text);

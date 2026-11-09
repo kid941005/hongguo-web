@@ -63,6 +63,14 @@
   }
   function deleteJson(path) { return request(path, null, { method: 'DELETE' }); }
 
+  // 顶部版本标识：从 /health 读取服务端实际版本，避免前端硬编码与镜像版本脱节
+  function loadVersion() {
+    fetch('/health', { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.version) $('appVersion').textContent = 'v' + j.version; })
+      .catch(function () {});
+  }
+
   function cur() { return state.source || ''; }
 
   // ---- 观看历史（localStorage） ----
@@ -1194,7 +1202,7 @@
   }
 
   bindPlayerEvents();
-  loadRate(); applyRate(); syncFullBtn(); renderAccount();
+  loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion();
   // PWA：注册 service worker（仅 http(s) 下有效）
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });
