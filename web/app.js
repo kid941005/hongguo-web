@@ -835,7 +835,16 @@
     });
     v.addEventListener('pause', function () { saveProgress(v); });
     v.addEventListener('ended', function () {
-      if (state.histKey) histUpdate(Math.floor(v.duration || 0), Math.floor(v.duration || 0));
+      var dur = Math.floor(v.duration || 0);
+      if (state.histKey) histUpdate(dur, dur);
+      // 片尾自动播放下一集；延迟期间若用户已手动切集/关闭播放器则不再触发
+      var endedEp = state.epIdx;
+      if (!$('player').classList.contains('hidden')) {
+        setTimeout(function () {
+          if ($('player').classList.contains('hidden') || state.epIdx !== endedEp) return;
+          nextEpisode();
+        }, 350);
+      }
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
     document.addEventListener('keydown', onPlayerKey);

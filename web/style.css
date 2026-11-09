@@ -196,6 +196,18 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 }
 /* 移动端安全区（iPhone 刘海/底部手势条） */
 @supports(padding:max(0px)){
-  .topbar{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+  .topbar{
+    padding-top:calc(10px + env(safe-area-inset-top,0px));
+    padding-left:max(12px,env(safe-area-inset-left));
+    padding-right:max(12px,env(safe-area-inset-right));
+  }
   body{padding-bottom:max(40px,env(safe-area-inset-bottom))}
+}
+@media (max-width:680px){
+  @supports(padding:max(0px)){
+    .player{
+      padding-top:env(safe-area-inset-top,0px);
+      padding-bottom:env(safe-area-inset-bottom,0px);
+    }
+  }
 }
