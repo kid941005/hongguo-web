@@ -1047,6 +1047,12 @@
     tags.appendChild(tag(s.builtin ? '内置' : '导入', s.builtin ? 'builtin' : 'user'));
     tags.appendChild(tag('v' + s.version, 'ver'));
     tags.appendChild(tag(s.type === 'builtin' ? '红果解密' : 'JS 源', 'kind'));
+    if (s.autoUpdate) tags.appendChild(tag('自动更新', 'auto'));
+    if (s.lastError) {
+      var errTag = tag('更新失败', 'warn');
+      errTag.title = s.lastError;
+      tags.appendChild(errTag);
+    }
     if (s.id === activeId) tags.appendChild(tag('使用中', 'on'));
     info.appendChild(name); info.appendChild(idEl); info.appendChild(tags);
     head.appendChild(info);
@@ -1059,6 +1065,13 @@
           .catch(function (e) { toast(e.message); });
       });
       acts.appendChild(use);
+    }
+    if (s.updateable) {
+      var autoBtn = document.createElement('button'); autoBtn.className = 'btn ghost mini';
+      autoBtn.textContent = s.autoUpdate ? '自动更新 开' : '自动更新 关';
+      autoBtn.title = s.autoUpdate ? '点击关闭自动更新' : '点击开启自动更新';
+      autoBtn.addEventListener('click', function () { toggleSourceAuto(s); });
+      acts.appendChild(autoBtn);
     }
     var logBtn = document.createElement('button'); logBtn.className = 'btn ghost mini'; logBtn.textContent = '日志';
     logBtn.addEventListener('click', function () { toggleLog(row, s.id, logBtn); });
@@ -1108,6 +1121,40 @@
     }).catch(function (e) { toast(e.message); });
   }
 
+  function toggleSourceAuto(s) {
+    var next = !s.autoUpdate;
+    postJson('/api/sources/' + encodeURIComponent(s.id) + '/auto-update', { enabled: next }).then(function () {
+      toast((next ? '已开启' : '已关闭') + '自动更新：' + (s.name || s.id));
+      return refreshManage();
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  function checkSourceUpdates() {
+    var btn = $('btnCheckUpdates');
+    if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+    postJson('/api/sources/check-updates', {}).then(function (r) {
+      var results = r.results || [];
+      var updated = 0, failed = 0, current = 0, busy = 0, older = 0;
+      results.forEach(function (item) {
+        if (item.status === 'updated') updated += 1;
+        else if (item.status === 'failed') failed += 1;
+        else if (item.status === 'older') older += 1;
+        else if (item.status === 'busy') busy += 1;
+        else current += 1;
+      });
+      var msg = '源更新检查完成：更新 ' + updated + ' 个，已是最新 ' + current + ' 个';
+      if (failed) msg += '，失败 ' + failed + ' 个';
+      if (older) msg += '，上游版本更低 ' + older + ' 个';
+      if (busy) msg += '，正在检查 ' + busy + ' 个';
+      toast(msg);
+      return refreshManage();
+    }).catch(function (e) {
+      toast('检查更新失败：' + e.message);
+    }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = '检查源更新'; }
+    });
+  }
+
   // ---- 事件绑定 ----
   $('btnSearch').addEventListener('click', doSearch);
   $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch(); });
@@ -1127,6 +1174,7 @@
   $('btnImport').addEventListener('click', openImport);
   $('btnManage').addEventListener('click', openManage);
   $('btnManageClose').addEventListener('click', closeManage);
+  $('btnCheckUpdates').addEventListener('click', checkSourceUpdates);
   $('btnRate').addEventListener('click', function () { cycleRate(1); });
   $('btnQuality').addEventListener('click', cycleQuality);
   $('btnFull').addEventListener('click', toggleFullscreen);

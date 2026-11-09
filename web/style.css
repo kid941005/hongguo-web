@@ -113,6 +113,8 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 .tag.ver{color:#b9c2d4}
 .tag.kind{color:#b6a8ff;border-color:#3b3358;background:#1c1830}
 .tag.on{color:#7ee0a8;border-color:#26543c;background:#12241a}
+.tag.auto{color:#9ecbff;border-color:#2f4a6b;background:#16202e}
+.tag.warn{color:#ffb4b4;border-color:#5b2a2a;background:#2a1414}
 .srcacts{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .btn.mini{padding:6px 11px;font-size:12.5px;border-radius:8px}
 .btn.ghost.mini.danger{color:#ff9b9b;border-color:#5a2a2a}

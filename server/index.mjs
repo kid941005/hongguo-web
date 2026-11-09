@@ -17,6 +17,11 @@ const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
 const BUILTIN_DIR = process.env.SOURCES_DIR || path.join(ROOT, "sources", "builtin");
 const TOKEN = process.env.TOKEN || "";
 const MAX_STREAMS = Number(process.env.MAX_STREAMS || 6);
+const SOURCE_AUTO_UPDATE = process.env.SOURCE_AUTO_UPDATE !== "0";
+const updateIntervalHours = Number(process.env.SOURCE_UPDATE_INTERVAL_HOURS);
+const SOURCE_UPDATE_INTERVAL_HOURS = Number.isFinite(updateIntervalHours) && updateIntervalHours > 0 ? updateIntervalHours : 6;
+const updateStartDelaySeconds = Number(process.env.SOURCE_UPDATE_START_DELAY_SECONDS);
+const SOURCE_UPDATE_START_DELAY_SECONDS = Number.isFinite(updateStartDelaySeconds) && updateStartDelaySeconds >= 0 ? updateStartDelaySeconds : 15;
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   console.error("PORT 无效: " + process.env.PORT);
@@ -48,6 +53,12 @@ server.listen(PORT, HOST, () => {
   console.log(
     JSON.stringify({ event: "listening", url: "http://" + HOST + ":" + PORT, version, active: sources.activeId, sources: sources.list().sources.length }),
   );
+  if (SOURCE_AUTO_UPDATE) {
+    sources.startAutoUpdate({
+      intervalMs: SOURCE_UPDATE_INTERVAL_HOURS * 60 * 60 * 1000,
+      initialDelayMs: SOURCE_UPDATE_START_DELAY_SECONDS * 1000,
+    });
+  }
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -59,6 +70,7 @@ function shutdown(signal) {
   if (closing) return;
   closing = true;
   console.log(JSON.stringify({ event: "shutdown", signal }));
+  sources.stopAutoUpdate();
   server.close(() => {
     try { db.close(); } catch {}
     process.exit(0);

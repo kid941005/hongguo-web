@@ -103,9 +103,10 @@
 <div id="manageModal" class="modal hidden">
   <div class="modal-box wide">
     <h3>数据源管理</h3>
-    <p class="hint">内置源随镜像发布，不可删除；导入的 JS 源存放在数据卷 <code>/app/data/sources</code> 里，重建容器不丢。</p>
+    <p class="hint">内置源随镜像发布，不可删除；导入的 JS 源存放在数据卷 <code>/app/data/sources</code> 里，重建容器不丢。内置源和 URL 导入源会自动检查上游更新，更新失败会保留旧版本。</p>
     <div id="srcList" class="srclist"></div>
     <div class="modal-actions">
+      <button id="btnCheckUpdates" class="btn ghost">检查源更新</button>
       <button id="btnManageClose" class="btn ghost">关闭</button>
     </div>
   </div>

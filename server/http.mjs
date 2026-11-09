@@ -223,6 +223,19 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
       const body = parseJsonBody(await readBody(req));
       return json(200, { ok: true, ...sources.setActive(String(body.id || "")) });
     }],
+    ["POST", /^\/api\/sources\/check-updates$/, async ({ json, req }) => {
+      const body = parseJsonBody(await readBody(req));
+      const results = await sources.checkAllUpdates({ force: body.force !== false });
+      return json(200, { ok: true, results, sources: sources.list() });
+    }],
+    ["POST", /^\/api\/sources\/([\w.\-]+)\/check-update$/, async ({ json, params }) => {
+      const result = await sources.checkUpdate(params[0], { force: true });
+      return json(200, { ok: true, result, sources: sources.list() });
+    }],
+    ["POST", /^\/api\/sources\/([\w.\-]+)\/auto-update$/, async ({ json, params, req }) => {
+      const body = parseJsonBody(await readBody(req));
+      return json(200, { ok: true, ...sources.setAutoUpdate(params[0], Boolean(body.enabled)) });
+    }],
     ["GET", /^\/api\/sources\/([\w.\-]+)\/log$/, ({ json, params }) =>
       json(200, { id: params[0], log: sources.logs(params[0]) })],
     ["DELETE", /^\/api\/sources\/([\w.\-]+)$/, ({ json, params }) =>

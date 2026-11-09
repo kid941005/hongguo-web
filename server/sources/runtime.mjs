@@ -7,6 +7,7 @@ import { assertPublicUrl, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 const RE_ID = /\bid\s*:\s*["']([^"']+)["']/;
 const RE_NAME = /\bname\s*:\s*["']([^"']+)["']/;
 const RE_VER = /\bversion\s*:\s*["']([^"']+)["']/;
+const RE_UPDATE_URL = /\bupdateUrl\s*:\s*["']([^"']+)["']/;
 const CORE_METHODS = ["home", "category", "detail", "search", "play"];
 const LOG_LIMIT = 120;
 const LOG_CHARS = 400;
@@ -17,7 +18,13 @@ export function parseMeta(code) {
   const id = RE_ID.exec(code);
   const name = RE_NAME.exec(code);
   const version = RE_VER.exec(code);
-  return { id: id ? id[1] : "", name: name ? name[1] : "", version: version ? version[1] : "" };
+  const updateUrl = RE_UPDATE_URL.exec(code);
+  return {
+    id: id ? id[1] : "",
+    name: name ? name[1] : "",
+    version: version ? version[1] : "",
+    updateUrl: updateUrl ? updateUrl[1] : "",
+  };
 }
 
 export function validateMeta(code) {

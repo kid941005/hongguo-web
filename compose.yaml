@@ -35,6 +35,11 @@ services:
       ALLOW_PRIVATE_MEDIA: "0"             # 1=允许 /api/media、/api/hls 代理内网地址（默认 0 拒绝，防 SSRF）
       ALLOW_PRIVATE_FETCH: "0"             # 1=允许 JS 源 fetch 与按 URL 导入源访问内网地址（默认 0 拒绝，防 SSRF）
 
+      # ---------- 源自动更新 ----------
+      SOURCE_AUTO_UPDATE: "1"              # 1=启动后自动检查 JS 源上游更新；0=关闭
+      SOURCE_UPDATE_INTERVAL_HOURS: "6"    # 自动检查间隔（小时）
+      SOURCE_UPDATE_START_DELAY_SECONDS: "15"  # 启动后首次检查延迟（秒）
+
     volumes:
       - hongguo-data:/app/data
 

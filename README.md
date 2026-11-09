@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.4.2","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -86,7 +86,7 @@ docker run -d --name hongguo-web \
   hongguo-web
 ```
 
-上面的端口、8 个环境变量、数据卷和安全选项与 [compose.yaml](compose.yaml) 一一对应（值就是 compose 里的默认值），要改哪项直接改对应的 `-e` 或 `-p`。
+上面的端口、环境变量、数据卷和安全选项与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量使用默认值），要改哪项直接改对应的 `-e` 或 `-p`。
 
 ### 1.7 升级与停止
 
@@ -110,10 +110,10 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.4.2
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.0
 ```
 
-参数与 [compose.yaml](compose.yaml) 完全一致（同样的端口、环境变量、卷与安全加固），只是不经过 compose。
+参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
 
 GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + linux/arm64）；若遇拉取限流或私有仓库，先 `docker login ghcr.io` 再拉。
 
@@ -125,19 +125,22 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | --- | --- | --- |
 | `PORT` | `8787` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
-| `DATA_DIR` | `/app/data` | 配置、用户源与账号数据库（`hongguo.db`）目录（需可写，建议挂持久卷） |
+| `DATA_DIR` | `/app/data` | 配置、用户源、源更新状态与账号数据库（`hongguo.db`）目录（需可写，建议挂持久卷） |
 | `SOURCES_DIR` | `/app/sources/builtin` | 内置源目录 |
 | `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>` 或 `?token=<TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住，并自动给 `/api/media`、`/api/hls`、`/api/stream` 等媒体地址追加 token |
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
 | `ALLOW_PRIVATE_MEDIA` | 空 | 设为 `1` 时允许 `/api/media`、`/api/hls` 代理内网地址（默认拒绝，防 SSRF） |
 | `ALLOW_PRIVATE_FETCH` | 空 | 设为 `1` 时允许 JS 源脚本 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
+| `SOURCE_AUTO_UPDATE` | `1` | 启动后自动检查 JS 源上游更新；设为 `0` 关闭（内置红果解密源不参与） |
+| `SOURCE_UPDATE_INTERVAL_HOURS` | `6` | 自动检查间隔（小时，最小 1） |
+| `SOURCE_UPDATE_START_DELAY_SECONDS` | `15` | 启动后首次检查延迟（秒） |
 
 ## 3. 使用
 
 - **切换源**：顶栏「源」下拉框；内置红果 + 随包附带的七猫/西饭/星芽/牛牛等 JS 源。
 - **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会并发查询所有源并按源交错合并，卡片左上角带源名徽标；点开卡片时自动带上它所属的源。顶部提示条会列出每个源命中多少条、哪些源失败。
-- **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。
-- **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。
+- **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。有上游地址的源会显示「自动更新」开关，面板底部「检查源更新」可立即检查全部源；更新失败只记录错误并保留旧版本。
+- **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。按 URL 导入的源会记住地址并默认自动更新（仅 HTTPS）；直接粘贴源码的源若 meta 里带 `updateUrl` 也会自动更新。
 - **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
 - **无限滚动**：首页、分类、搜索结果和推荐页滑到底部会自动加载下一页；「加载更多」按钮仍保留作为兜底（自动加载不可用时手动点）。
 - **搜索**：输入关键词回车。红果内置源的官方搜索接口被风控，会自动降级为「首页推荐池检索」（结果偏少，界面会提示）；JS 源走各自搜索接口，完整可用。
@@ -195,7 +198,7 @@ hongguo-web/
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
 │  └─ sources/
 │     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时（node:vm）
-│     ├─ manager.mjs       # 源的扫描/安装/删除/启用
+│     ├─ manager.mjs       # 源的扫描/安装/删除/启用/自动更新
 │     └─ shims.js          # fetch/HTML 解析垫片（对齐 App 内 CatPaw 运行时）
 ├─ sources/builtin/        # 内置 JS 源：qimao / xifan / xingya / niuniu / template / maccms
 └─ web/                    # 前端静态页 + hls.js + PWA（manifest / sw.js / icons/）
@@ -210,6 +213,7 @@ var spider = {
   id: "my_source",        // 唯一 id
   name: "我的源",          // 显示名
   version: "1.0.0",       // 可选；给了就必须是 x.y.z
+  updateUrl: "https://example.com/my_source.js",  // 可选；HTTPS 上游地址，用于自动更新
   init: function (extend) {},                                   // 可选
   home: function (filter, isFirst) {                            // 首页：分类 + 推荐
     return { class: [{ type_id: "1", type_name: "全部" }], list: [] };  // list 可省略，服务端会用第一个分类兜底
@@ -235,6 +239,7 @@ var spider = {
 要点：
 
 - 有网可用 `await fetch(url, { headers, timeoutMs })`；`html.parse(...)` 可用（支持 `tag`、`.class`、`#id`、`tag.class`、空格后代选择器）。
+- `updateUrl` 必须是 HTTPS 且返回同一个 `id` 的源；更新前会先跑一次 `home` 自检，失败则保留旧版本。按 URL 导入时即使 meta 没写 `updateUrl`，也会用导入地址作为上游。
 - `play` 返回**可直连**的 `m3u8` / `mp4`（`flv` 能识别但没有播放器）。若返回 `parse: 1`（需要 webview 嗅探），本服务**不支持**，会报「需要 webview 嗅探解析」。
 - 除上述方法外还可选实现 `feed / rankings / recommendations / rankingBoards / seriesSeasons / danmaku` 等（本服务目前只用核心方法）。
 - 不得 `import` / `require`，不得访问 Node 内置模块或文件系统。
@@ -260,6 +265,9 @@ var spider = {
 | POST | `/api/sources/active` | 切换启用源：`{ "id": "qimao" }` |
 | GET | `/api/sources/:id/log` | 源最近运行日志 |
 | DELETE | `/api/sources/:id` | 删除用户源（内置源不可删） |
+| POST | `/api/sources/check-updates` | 立即检查所有可自动更新的 JS 源（`{ "force": false }` 走 ETag） |
+| POST | `/api/sources/:id/check-update` | 立即检查单个源更新 |
+| POST | `/api/sources/:id/auto-update` | 开关单个源自动更新：`{ "enabled": true }` |
 | GET | `/api/home?source=&page=` | 首页（`classes` + `items`） |
 | GET | `/api/recommend?page=` | 推荐页：内置红果四榜单按真实评分合并排序（`items[].score/heat/bang`） |
 | GET | `/api/category?source=&tid=&page=` | 分类列表 |
@@ -286,6 +294,7 @@ var spider = {
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
 - **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。
+- **源自动更新**：只对 HTTPS 上游生效；内置红果解密源不在自动更新范围内（它依赖服务端解密模块，需随镜像升级）。更新失败会保留旧版本并记录原因，可在源管理面板查看。
 - 仅供个人学习与自用；内容版权归各平台所有，请勿用于商业分发。
 
 ## 8. 截图

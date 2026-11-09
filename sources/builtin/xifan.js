@@ -14,7 +14,8 @@ const meta = {
   author: "THL adapter",
   type: "video",
   icon: "",
-  features: ["search", "categories"]
+  features: ["search", "categories"],
+  updateUrl: "https://raw.githubusercontent.com/kid941005/hongguo-web/main/sources/builtin/xifan.js"
 };
 
 const HOST = "https://xifan-api-cn.youlishipin.com";
