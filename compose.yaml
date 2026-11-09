@@ -1,19 +1,58 @@
+# 红果短剧网页版 —— Docker Compose 示例
+#
+# 用法（二选一）：
+#   1) 用现成镜像（默认）： cp .env.example .env  →  按需改端口/口令  →  docker compose up -d
+#   2) 从源码构建：把下面 image: 一行注释掉，取消 build: 的注释，然后 docker compose up -d --build
+#
+# 常用命令： docker compose logs -f   /   docker compose down（保留数据）
+# 变量都可以写在 .env 里，这里给的都是默认值。
+
 services:
   hongguo-web:
-    build: .
-    image: hongguo-web:latest
+    image: ghcr.io/kid941005/hongguo-web:0.2.1
+    # build: .
     container_name: hongguo-web
+
     ports:
-      - "8787:8787"
+      # 宿主机端口:容器端口。容器内监听端口由 PORT 决定，这里跟随同一个变量，改一处即可
+      - "${APP_PORT:-8787}:${PORT:-8787}"
+
     environment:
-      PORT: "8787"
-      HOST: "0.0.0.0"
-      DATA_DIR: /app/data
-      # TOKEN: "改成你的口令"   # 可选：设置后所有 /api 请求需带 Authorization: Bearer <TOKEN>
+      # ---------- 基础 ----------
+      PORT: "${PORT:-8787}"                        # 容器内监听端口
+      HOST: "0.0.0.0"                              # 监听地址，容器内固定 0.0.0.0 才能被映射出去
+      DATA_DIR: "/app/data"                        # 配置 + 导入的 JS 源 + 缓存（必须可写，已挂卷）
+      SOURCES_DIR: "/app/sources/builtin"          # 内置源目录（镜像自带，只读即可）
+      TZ: "${TZ:-Asia/Shanghai}"                   # 时区，日志时间用
+
+      # ---------- 访问控制 ----------
+      # 设置后所有 /api/* 需带 Authorization: Bearer <TOKEN>；
+      # 浏览器首次打开 http://<host>:8787/?token=<TOKEN> 一次，前端会记住。留空=不校验。
+      TOKEN: "${TOKEN:-}"
+
+      # ---------- 播放 / 安全 ----------
+      MAX_STREAMS: "${MAX_STREAMS:-6}"            # 内置红果解密流的最大并发数
+      ALLOW_PRIVATE_MEDIA: "${ALLOW_PRIVATE_MEDIA:-0}"  # 1=允许 /api/media、/api/hls 代理内网地址（默认 0 拒绝，防 SSRF）
+
     volumes:
       - hongguo-data:/app/data
+
     restart: unless-stopped
-    # 安全加固：容器内无需写入除 /app/data 外的路径
+
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ---------- 安全加固（容器内只允许写挂载卷与 /tmp） ----------
     read_only: true
     tmpfs:
       - /tmp

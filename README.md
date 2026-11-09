@@ -14,18 +14,29 @@
 ```bash
 git clone https://github.com/kid941005/hongguo-web.git
 cd hongguo-web
-docker compose up -d --build
+cp .env.example .env        # 可选：改端口、访问口令等
+docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hongguo-web:0.2.1
 ```
 
 打开 <http://localhost:8787>。
 
-修改端口：编辑 `compose.yaml` 里的 `ports: "8787:8787"`（左侧为宿主机端口）。
+容器名 `hongguo-web`、命名卷 `hongguo-data`、以及 compose 里全部环境变量都在 [compose.yaml](compose.yaml) 里。示例：
+
+| 需求 | 做法 |
+| --- | --- |
+| 换宿主机端口 | `.env` 里改 `APP_PORT=9000`（容器内 `PORT` 跟随联动，映射为 `9000:8787`） |
+| 加访问口令 | `.env` 里填 `TOKEN=你的口令`；浏览器首次访问 `http://<host>:8787/?token=你的口令` |
+| 放大并发播放 | `.env` 里 `MAX_STREAMS=12` |
+| 允许代理内网媒体 | `.env` 里 `ALLOW_PRIVATE_MEDIA=1`（默认 0 拒绝，防 SSRF） |
+| 从源码构建镜像 | 把 `compose.yaml` 的 `image:` 注释掉、取消 `build: .` 的注释，然后 `docker compose up -d --build` |
+
+`.env` 已在 `.gitignore` 里，不会被提交；模板见 [.env.example](.env.example)。
 
 源与配置保存在命名卷 `hongguo-data`（容器内 `/app/data`），升级/重建不丢：
 
 ```bash
-docker compose down          # 保留数据
-docker compose up -d --build # 重新构建
+docker compose down          # 停掉容器，数据卷保留
+docker compose up -d         # 重新启动（镜像模式会拉取最新镜像；源码模式加 --build）
 ```
 
 ### 不用 compose
@@ -97,7 +108,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 
 ```
 hongguo-web/
-├─ Dockerfile / compose.yaml / .dockerignore
+├─ Dockerfile / compose.yaml / .dockerignore / .env.example
 ├─ LICENSE                 # GPL-3.0 全文
 ├─ .github/workflows/docker.yml  # 镜像构建工作流（GHCR，main→:edge，tag→:版本+:latest）
 ├─ docs/                   # research.md（上游调研）+ screenshots/
