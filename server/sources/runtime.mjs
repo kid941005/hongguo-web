@@ -1,5 +1,4 @@
-import vm from "node:vm";
-import { htmlShim } from "./shims.js";
+import { Worker } from "node:worker_threads";
 import { fail } from "../errors.mjs";
 import { safeFetch, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 
@@ -11,6 +10,12 @@ const RE_UPDATE_URL = /\bupdateUrl\s*:\s*["']([^"']+)["']/;
 const CORE_METHODS = ["home", "category", "detail", "search", "play"];
 const LOG_LIMIT = 120;
 const LOG_CHARS = 400;
+
+const WORKER_LOAD_TIMEOUT = 45000;
+const WORKER_OLD_MB = Math.max(32, Number(process.env.SOURCE_WORKER_MAX_OLD_MB) || 64);
+const WORKER_YOUNG_MB = Math.max(8, Number(process.env.SOURCE_WORKER_MAX_YOUNG_MB) || 16);
+const WORKER_STACK_MB = Math.max(2, Number(process.env.SOURCE_WORKER_STACK_MB) || 4);
+const WORKER_URL = new URL("./worker.mjs", import.meta.url);
 
 export function parseMeta(code) {
   const id = RE_ID.exec(code);
@@ -40,85 +45,44 @@ export function validateMeta(code) {
   return { meta, problems };
 }
 
-function safeJson(value) {
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
-
-function makeFetch() {
-  return async function fetch(input, options = {}) {
-    const rawUrl = typeof input === "string" ? input : String((input && input.url) || input);
-    const method = String(options.method || "GET").toUpperCase();
-    const headers = {};
-    if (options.headers) {
-      try {
-        // Headers / Map / 数组 / 普通对象都归一成普通对象；直接 spread Headers 会得到空对象。
-        new Headers(options.headers).forEach((value, key) => { headers[key] = value; });
-      } catch {
-        Object.assign(headers, options.headers);
-      }
-    }
-    const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000;
-
-    try {
-      let body = options.body;
-      if (body && typeof body === "object" && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
-        try { body = JSON.stringify(body); } catch { body = String(body); }
-      }
-      const response = await safeFetch(rawUrl, {
-        method,
-        headers,
-        body,
-        redirect: options.redirect || "follow",
-        timeoutMs,
-        allowPrivate: PRIVATE_FETCH_ALLOWED,
-        message: "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）",
-      });
-      const buffer = Buffer.from(await response.arrayBuffer());
-      const text = buffer.toString("utf8");
-      const responseHeaders = {};
-      response.headers.forEach((value, key) => { responseHeaders[key] = value; });
-      return {
-        status: response.status,
-        ok: response.ok,
-        url: response.url,
-        headers: responseHeaders,
-        body: text,
-        text: async () => text,
-        json: async () => {
-          try { return JSON.parse(text); }
-          catch { throw fail("INVALID_RESPONSE", "源接口返回的不是合法 JSON"); }
-        },
-        arrayBuffer: async () => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
-      };
-    } catch (error) {
-      if (error && error.code === "BAD_URL") throw error;
-      const aborted = error && (error.code === "TIMEOUT" || error.name === "AbortError" || error.name === "TimeoutError");
-      const failure = new Error(aborted ? "网络请求超时" : "网络请求失败");
-      failure.code = aborted ? "TIMEOUT" : "HTTP_0";
-      throw failure;
-    }
+async function performFetch(payload) {
+  const options = payload || {};
+  const response = await safeFetch(String(options.url || ""), {
+    method: String(options.method || "GET").toUpperCase(),
+    headers: options.headers || {},
+    body: options.body,
+    redirect: options.redirect || "follow",
+    timeoutMs: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000,
+    allowPrivate: PRIVATE_FETCH_ALLOWED,
+    message: "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）",
+  });
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const headers = {};
+  response.headers.forEach((value, key) => { headers[key] = value; });
+  return {
+    status: response.status,
+    ok: response.ok,
+    url: response.url,
+    headers: headers,
+    text: buffer.toString("utf8"),
+    bytes: new Uint8Array(buffer),
   };
 }
 
-function withTimeout(promise, ms, label) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(fail("TIMEOUT", "源响应超时: " + label)), ms);
-    promise.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); },
-    );
-  });
-}
-
-// 每个源一个常驻 vm 上下文：模块级状态（缓存、会话）在多次调用之间保留。
+// 每个源一个独立 worker_threads isolate：模块级状态（缓存、会话）在多次调用之间保留。
+// 主线程只通过消息通道执行 fetch/返回结果；源本身拿不到主进程的 require/process/文件系统。
 export class SourceRuntime {
   constructor({ code, meta, file }) {
     this.code = code;
     this.meta = meta;
     this.file = file;
-    this.context = null;
+    this.worker = null;
     this.loading = null;
+    this.readyState = "idle";
+    this.pendingCalls = new Map();
+    this.callSeq = 0;
     this.logs = [];
+    this.disposed = false;
   }
 
   pushLog(line) {
@@ -128,76 +92,178 @@ export class SourceRuntime {
 
   // 并发安全：同时到达的请求共享同一次装载。
   async ensure() {
-    if (this.context) return;
+    if (this.disposed) throw fail("SOURCE_LOAD", "源已释放");
+    if (this.readyState === "ready" && this.worker) return;
     if (!this.loading) {
-      this.loading = this.load().finally(() => { this.loading = null; });
+      this.loading = this.startWorker().finally(() => { this.loading = null; });
     }
     await this.loading;
   }
 
-  async load() {
-    const context = vm.createContext({
-      console: {
-        log: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-        info: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-        warn: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-        error: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-        debug: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-        trace: (...args) => this.pushLog(args.map((a) => (typeof a === "string" ? a : safeJson(a))).join(" ")),
-      },
-      fetch: makeFetch(),
-      URL,
-      URLSearchParams,
-      TextDecoder,
-      TextEncoder,
-      atob: (value) => Buffer.from(String(value), "base64").toString("binary"),
-      btoa: (value) => Buffer.from(String(value), "binary").toString("base64"),
-      setTimeout,
-      clearTimeout,
-      queueMicrotask,
-    });
-
-    vm.runInContext(htmlShim, context, { filename: "html-shim.js" });
-    vm.runInContext(
-      'globalThis.__invoke = async function (method, args) {' +
-        '  if (typeof spider === "undefined" || !spider) throw new Error("spider 未定义");' +
-        '  var fn = spider[method];' +
-        '  if (typeof fn !== "function") throw new Error("缺少方法 " + method);' +
-        '  var result = await fn.apply(spider, args);' +
-        '  return JSON.stringify(result === undefined ? null : result);' +
-        '};',
-      context,
-    );
-
+  startWorker() {
+    if (this.disposed) return Promise.reject(fail("SOURCE_LOAD", "源已释放"));
+    this.terminateWorker();
+    let worker;
     try {
-      vm.runInContext(this.code, context, { filename: this.file || "source.js", timeout: 5000 });
-      this.context = context;
-      const hasInit = vm.runInContext(
-        'typeof spider !== "undefined" && spider && typeof spider.init === "function"',
-        context,
-      );
-      if (hasInit) await this.call("init", [], 30000);
+      worker = new Worker(WORKER_URL, {
+        workerData: { code: this.code, file: this.file },
+        resourceLimits: {
+          maxOldGenerationSizeMb: WORKER_OLD_MB,
+          maxYoungGenerationSizeMb: WORKER_YOUNG_MB,
+          stackSizeMb: WORKER_STACK_MB,
+        },
+      });
     } catch (error) {
-      this.context = null;
-      const message = String((error && error.message) || error);
-      throw fail("SOURCE_LOAD", "源脚本执行失败: " + message);
+      return Promise.reject(fail("SOURCE_LOAD", "源运行时创建失败: " + String((error && error.message) || error)));
     }
+    worker.unref();
+    this.worker = worker;
+    this.readyState = "starting";
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+          this.terminateWorker();
+          reject(error);
+        } else {
+          this.readyState = "ready";
+          resolve();
+        }
+      };
+      const timer = setTimeout(() => {
+        finish(fail("SOURCE_LOAD", "源脚本加载超时"));
+      }, WORKER_LOAD_TIMEOUT);
+
+      worker.on("message", (message) => {
+        if (!message || typeof message !== "object") return;
+        if (message.type === "log") { this.pushLog(message.line); return; }
+        if (message.type === "ready") { finish(); return; }
+        if (message.type === "load-error") {
+          finish(fail("SOURCE_LOAD", "源脚本执行失败: " + ((message.error && message.error.message) || "未知错误")));
+          return;
+        }
+        if (message.type === "fetch") { this.handleFetch(message); return; }
+        if (message.type === "result") { this.resolveCall(message); return; }
+      });
+      worker.on("error", (error) => {
+        const failure = error && error.code === "ERR_WORKER_OUT_OF_MEMORY"
+          ? fail("SOURCE_OOM", "源脚本内存超限")
+          : fail("SOURCE_LOAD", "源脚本执行失败: " + String((error && error.message) || error));
+        if (!settled) {
+          finish(failure);
+          this.failPending(failure);
+          return;
+        }
+        // 已就绪后发生错误（含运行期 OOM）：标记不可用并让所有在途调用失败。
+        if (this.worker === worker) {
+          this.worker = null;
+          this.readyState = "dead";
+        }
+        this.failPending(failure);
+      });
+      worker.on("exit", (code) => {
+        if (!settled) {
+          finish(fail("SOURCE_LOAD", "源进程异常退出: " + code));
+          return;
+        }
+        if (this.worker === worker) {
+          this.worker = null;
+          this.readyState = "dead";
+          this.failPending(fail("SOURCE_CRASH", "源进程异常退出: " + code));
+        }
+      });
+    });
+  }
+
+  handleFetch(message) {
+    const worker = this.worker;
+    performFetch(message.payload).then(
+      (result) => {
+        try { if (worker && this.worker === worker) worker.postMessage({ type: "fetch-result", id: message.id, ok: true, result: result }); } catch {}
+      },
+      (error) => {
+        const failure = {
+          code: (error && error.code) || "HTTP_0",
+          message: String((error && error.message) || "网络请求失败"),
+        };
+        try { if (worker && this.worker === worker) worker.postMessage({ type: "fetch-result", id: message.id, ok: false, error: failure }); } catch {}
+      },
+    );
+  }
+
+  resolveCall(message) {
+    const pending = this.pendingCalls.get(message.id);
+    if (!pending) return;
+    this.pendingCalls.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.error) {
+      const error = new Error(String((message.error && message.error.message) || "源执行失败"));
+      error.code = (message.error && message.error.code) || "SOURCE_ERROR";
+      this.pushLog("[" + pending.method + "] 失败 " + (Date.now() - pending.started) + "ms: " + error.message);
+      pending.reject(error);
+      return;
+    }
+    this.pushLog("[" + pending.method + "] ok " + (Date.now() - pending.started) + "ms");
+    const json = message.json;
+    if (json == null) { pending.resolve(null); return; }
+    try { pending.resolve(JSON.parse(json)); } catch { pending.resolve(json); }
+  }
+
+  failPending(error) {
+    const calls = Array.from(this.pendingCalls.values());
+    this.pendingCalls.clear();
+    for (const pending of calls) {
+      clearTimeout(pending.timer);
+      try { pending.reject(error); } catch {}
+    }
+  }
+
+  terminateWorker() {
+    const worker = this.worker;
+    this.worker = null;
+    this.readyState = "dead";
+    if (!worker) return;
+    try { worker.removeAllListeners(); } catch {}
+    try {
+      const pending = worker.terminate();
+      if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    } catch {}
   }
 
   async call(method, args = [], timeoutMs = 40000) {
     await this.ensure();
+    if (!this.worker || this.readyState !== "ready") throw fail("SOURCE_LOAD", "源运行时不可用");
+    const id = ++this.callSeq;
     const started = Date.now();
-    const script = "__invoke(" + JSON.stringify(method) + ", " + JSON.stringify(args) + ")";
-    try {
-      const pending = vm.runInContext(script, this.context, { timeout: 5000 });
-      pending.catch(() => {});
-      const json = await withTimeout(pending, timeoutMs, method);
-      this.pushLog("[" + method + "] ok " + (Date.now() - started) + "ms");
-      if (json == null) return null;
-      try { return JSON.parse(json); } catch { return json; }
-    } catch (error) {
-      this.pushLog("[" + method + "] 失败 " + (Date.now() - started) + "ms: " + ((error && error.message) || error));
-      throw error;
-    }
+    const worker = this.worker;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCalls.delete(id);
+        this.pushLog("[" + method + "] 超时 " + (Date.now() - started) + "ms");
+        const error = fail("TIMEOUT", "源响应超时: " + method);
+        this.terminateWorker();
+        this.failPending(error);
+        reject(error);
+      }, timeoutMs);
+      this.pendingCalls.set(id, { resolve: resolve, reject: reject, timer: timer, method: method, started: started });
+      try {
+        worker.postMessage({ type: "invoke", id: id, method: method, args: args });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingCalls.delete(id);
+        reject(fail("SOURCE_LOAD", "源运行时不可用: " + String((error && error.message) || error)));
+      }
+    });
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.failPending(fail("SOURCE_LOAD", "源已释放"));
+    this.terminateWorker();
   }
 }

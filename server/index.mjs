@@ -70,7 +70,7 @@ function shutdown(signal) {
   if (closing) return;
   closing = true;
   console.log(JSON.stringify({ event: "shutdown", signal }));
-  sources.stopAutoUpdate();
+  try { sources.close(); } catch {}
   server.close(() => {
     try { db.close(); } catch {}
     process.exit(0);

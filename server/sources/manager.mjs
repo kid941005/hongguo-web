@@ -178,8 +178,8 @@ export class SourceManager {
     readDirectory(this.builtinDir, true);
     readDirectory(this.userDir, false);
 
-    for (const id of this.runtimes.keys()) {
-      if (!registry.has(id)) this.runtimes.delete(id);
+    for (const id of Array.from(this.runtimes.keys())) {
+      if (!registry.has(id)) this.disposeRuntime(id);
     }
     this.registry = registry;
     this.activeId = registry.has(this.readActive()) ? this.readActive() : BUILTIN_ID;
@@ -194,10 +194,23 @@ export class SourceManager {
     if (!entry || entry.type !== "js") return null;
     let runtime = this.runtimes.get(id);
     if (!runtime || runtime.file !== entry.file) {
+      if (runtime) this.disposeRuntime(id);
       runtime = new SourceRuntime({ code: fs.readFileSync(entry.file, "utf8"), meta: entry, file: entry.file });
       this.runtimes.set(id, runtime);
     }
     return runtime;
+  }
+
+  disposeRuntime(id) {
+    const runtime = this.runtimes.get(id);
+    if (!runtime) return;
+    this.runtimes.delete(id);
+    try { runtime.dispose(); } catch {}
+  }
+
+  close() {
+    this.stopAutoUpdate();
+    for (const id of Array.from(this.runtimes.keys())) this.disposeRuntime(id);
   }
 
   list() {
@@ -278,7 +291,11 @@ export class SourceManager {
 
   async selfTest(code, meta, file) {
     const runtime = new SourceRuntime({ code, meta, file });
-    await runtime.call("home", [{}, false], SELF_TEST_TIMEOUT);
+    try {
+      await runtime.call("home", [{}, false], SELF_TEST_TIMEOUT);
+    } finally {
+      runtime.dispose();
+    }
   }
 
   async install({ code, url }) {
@@ -296,7 +313,7 @@ export class SourceManager {
     }
 
     this.writeSource(meta.id, source);
-    this.runtimes.delete(meta.id);
+    this.disposeRuntime(meta.id);
     this.scan();
     const entry = this.get(meta.id);
     const runtime = this.runtime(meta.id);
@@ -309,7 +326,7 @@ export class SourceManager {
       } else {
         try { fs.unlinkSync(entry.file); } catch { /* 文件可能已被外部删除 */ }
       }
-      this.runtimes.delete(meta.id);
+      this.disposeRuntime(meta.id);
       this.scan();
       throw fail("INVALID_SOURCE", "源初始化失败: " + ((error && error.message) || error));
     }
@@ -377,7 +394,7 @@ export class SourceManager {
         path.join(this.userDir, safeFileName(entry.id) + ".js"),
       );
       this.writeSource(entry.id, fetched.text);
-      this.runtimes.delete(entry.id);
+      this.disposeRuntime(entry.id);
       this.patchState(entry.id, {
         url: updateUrl,
         autoUpdate: saved.autoUpdate !== false,
@@ -476,7 +493,7 @@ export class SourceManager {
     if (!entry) throw fail("NOT_FOUND", "源不存在");
     if (entry.builtin) throw fail("PROTECTED", "内置源不能删除");
     try { fs.unlinkSync(entry.file); } catch {}
-    this.runtimes.delete(id);
+    this.disposeRuntime(id);
     this.deleteState(id);
     if (this.activeId === id) this.writeActive(BUILTIN_ID);
     this.scan();

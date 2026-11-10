@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.4","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.5","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.4
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.5
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -131,6 +131,9 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
 | `ALLOW_PRIVATE_MEDIA` | 空 | 设为 `1` 时允许 `/api/media`、`/api/hls` 代理内网地址（默认拒绝，防 SSRF） |
 | `ALLOW_PRIVATE_FETCH` | 空 | 设为 `1` 时允许 JS 源脚本 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
+| `SOURCE_WORKER_MAX_OLD_MB` | `64` | 每个 JS 源沙箱线程的 V8 老生代内存上限（MB，最小 32）；超限自动终止该源 |
+| `SOURCE_WORKER_MAX_YOUNG_MB` | `16` | 每个 JS 源沙箱线程的 V8 新生代内存上限（MB，最小 8） |
+| `SOURCE_WORKER_STACK_MB` | `4` | 每个 JS 源沙箱线程的栈上限（MB，最小 2） |
 | `SOURCE_AUTO_UPDATE` | `1` | 启动后自动检查 JS 源上游更新；设为 `0` 关闭（内置红果解密源不参与） |
 | `SOURCE_UPDATE_INTERVAL_HOURS` | `6` | 自动检查间隔（小时，最小 1） |
 | `SOURCE_UPDATE_START_DELAY_SECONDS` | `15` | 启动后首次检查延迟（秒） |
@@ -197,7 +200,8 @@ hongguo-web/
 │  ├─ users.mjs            # 账号与个人数据读写（UserStore）
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
 │  └─ sources/
-│     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时（node:vm）
+│     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时装配（每源独立 worker_threads，仅消息通道暴露 fetch）
+│     ├─ worker.mjs        # 源沙箱线程：node:vm 上下文 + resourceLimits，执行源并回传结果/日志
 │     ├─ manager.mjs       # 源的扫描/安装/删除/启用/自动更新
 │     └─ shims.js          # fetch/HTML 解析垫片（对齐 App 内 CatPaw 运行时）
 ├─ sources/builtin/        # 内置 JS 源：qimao / xifan / xingya / niuniu / template / maccms
@@ -206,7 +210,7 @@ hongguo-web/
 
 ## 5. 自定义 JS 源格式（糖葫芦同款）
 
-源是**单个 .js 文件**，声明一个全局 `spider` 对象。运行时只提供必要的垫片，不提供 Node API。
+源是**单个 .js 文件**，声明一个全局 `spider` 对象。每个源在独立的 `worker_threads` 线程里运行（内存上限默认 64 MB，调用超时会直接终止该源线程），只通过消息通道获得 `fetch`，拿不到 `require`/`process`/文件系统等 Node API。
 
 ```js
 var spider = {
@@ -295,6 +299,7 @@ var spider = {
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
 - **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。
+- **JS 源沙箱**：每个 JS 源在独立 `worker_threads` 线程内运行，默认 64 MB 内存上限；死循环/超时或内存超限会自动终止该源线程，不影响主服务，下次调用自动重启。单次同步执行超过 5 秒会被中断，防止死循环占满 CPU。可用 `SOURCE_WORKER_MAX_OLD_MB` 等变量调整。
 - **源自动更新**：只对 HTTPS 上游生效；内置红果解密源不在自动更新范围内（它依赖服务端解密模块，需随镜像升级）。更新失败会保留旧版本并记录原因，可在源管理面板查看。
 - 仅供个人学习与自用；内容版权归各平台所有，请勿用于商业分发。
 
