@@ -8,9 +8,9 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-# 先装依赖，利用层缓存（依赖只有 axios，版本已精确锁定，npm 装即可）
-COPY server/package.json ./server/
-RUN cd server && npm install --omit=dev --no-audit --no-fund
+# 用 pnpm + lockfile 安装生产依赖，确保构建可复现（不要退回 npm install，会漂移传递依赖）
+COPY server/package.json server/pnpm-lock.yaml ./server/
+RUN corepack enable && cd server && pnpm install --prod --frozen-lockfile
 
 # 再拷代码
 COPY server ./server

@@ -672,8 +672,9 @@ async function play(flag, id, flags) {
   const parts = raw.split("+");
   try {
     if (parts.length === 2) {
-      const ep = (parts[0].match(/\d+/) || [""])[0];
-      const did = parts[1];
+      // detail 里拼的是 did + "+" + ep.id，所以第一个是剧 id、第二个是集 id。
+      const did = parts[0];
+      const ep = (parts[1].match(/\d+/) || [""])[0];
       const data = await requestJson(HOST + "/api/v1/app/play/movieDetails", {
         method: "POST",
         body: JSON.stringify({ episodeId: ep, id: did, source: 0, typeId: "S1", userId: "223664" })

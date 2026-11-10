@@ -79,6 +79,21 @@ function splitPlayUrl(vodPlayUrl, vodPlayFrom) {
     .filter((line) => line.episodes.length);
 }
 
+function headerValue(headers, name) {
+  const target = String(name).toLowerCase();
+  for (const key of Object.keys(headers || {})) {
+    if (key.toLowerCase() === target) return String(headers[key] == null ? "" : headers[key]).trim();
+  }
+  return "";
+}
+
+function nextPage(result, items, current, pageCount) {
+  // 空页永远视为结束，避免不规范源一直返回 hasMore=true 造成无限滚动。
+  if (!items.length) return false;
+  if (result && !Array.isArray(result) && typeof result.hasMore === "boolean") return result.hasMore;
+  return pageCount ? current < pageCount : true;
+}
+
 function classifyUrl(url) {
   const value = String(url || "");
   if (/\.m3u8(\?|#|$)/i.test(value) || /\/m3u8/i.test(value) || /format=m3u8/i.test(value)) return "hls";
@@ -209,7 +224,7 @@ export function createCatalog({ provider, sources }) {
       tid,
       items,
       page: current,
-      hasMore: pageCount ? current < pageCount : items.length > 0,
+      hasMore: nextPage(result, items, current, pageCount),
     };
   }
 
@@ -227,7 +242,7 @@ export function createCatalog({ provider, sources }) {
       source: entry.id,
       items,
       page: current,
-      hasMore: pageCount ? current < pageCount : items.length > 0,
+      hasMore: nextPage(result, items, current, pageCount),
     };
   }
 
@@ -300,12 +315,16 @@ export function createCatalog({ provider, sources }) {
     if (url.startsWith("//")) url = "https:" + url;
 
     const type = classifyUrl(url);
-    const referer = headers.Referer || headers.referer || headers.REFERER || "";
+    const referer = headerValue(headers, "referer");
+    // 部分源只接受自己的 UA（如 okhttp/牛牛），把 UA 也带到代理参数里。
+    const userAgent = headerValue(headers, "user-agent").replace(/[\r\n]/g, "").slice(0, 300);
     const encoded = encodeURIComponent(url);
     const proxyBase = type === "hls" ? "/api/hls?u=" : "/api/media?u=";
     return {
       type,
-      url: proxyBase + encoded + (referer ? "&r=" + encodeURIComponent(referer) : ""),
+      url: proxyBase + encoded +
+        (referer ? "&r=" + encodeURIComponent(referer) : "") +
+        (userAgent ? "&ua=" + encodeURIComponent(userAgent) : ""),
       sourceUrl: url,
       headers,
     };
@@ -377,15 +396,19 @@ export function createCatalog({ provider, sources }) {
       sourceName: "红果推荐",
       recommend: true,
       page: pageNo,
-      items: slice.map((row) => ({
-        ...normVod(row),
-        source: "hongguo",
-        sourceName: row.bang || "红果热播榜",
-        score: row.score,
-        heat: row.heat,
-        bang: row.bang,
-        rank: row.rank,
-      })),
+      items: slice.map((row) => {
+        const item = normVod(row);
+        if (!item) return null;
+        return {
+          ...item,
+          source: "hongguo",
+          sourceName: row.bang || "红果热播榜",
+          score: row.score,
+          heat: row.heat,
+          bang: row.bang,
+          rank: row.rank,
+        };
+      }).filter(Boolean),
       hasMore: start + slice.length < pool.length,
       total: pool.length,
     };

@@ -22,18 +22,31 @@ function sendJson(res, status, value, extraHeaders) {
 function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let settled = false;
     const chunks = [];
     req.on("data", (chunk) => {
+      if (settled) return;
       size += chunk.length;
       if (size > limit) {
+        // 不立刻 destroy：先把响应写回客户端，再放弃后续数据，否则客户端只会收到连接重置。
+        settled = true;
+        chunks.length = 0;
         reject(fail("TOO_BIG", "请求体过大"));
-        req.destroy();
+        req.resume();
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
 }
 
@@ -276,13 +289,13 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     ["GET", /^\/api\/media$/, async ({ req, res, q }) => {
       const target = q.get("u");
       if (!target) throw fail("BAD_INPUT", "缺少 u");
-      await proxyMedia(req, res, { url: target, referer: q.get("r") || "" });
+      await proxyMedia(req, res, { url: target, referer: q.get("r") || "", ua: q.get("ua") || "" });
     }],
     ["GET", /^\/api\/hls$/, async ({ req, res, q }) => {
       const target = q.get("u");
       if (!target) throw fail("BAD_INPUT", "缺少 u");
       const accessToken = q.get("token") || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-      await proxyHls(req, res, { url: target, referer: q.get("r") || "", token: accessToken });
+      await proxyHls(req, res, { url: target, referer: q.get("r") || "", token: accessToken, ua: q.get("ua") || "" });
     }],
 
     // ---- 内置红果：服务端解密流 ----

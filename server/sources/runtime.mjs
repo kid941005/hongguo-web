@@ -50,7 +50,15 @@ function makeFetch() {
   return async function fetch(input, options = {}) {
     const rawUrl = typeof input === "string" ? input : String((input && input.url) || input);
     const method = String(options.method || "GET").toUpperCase();
-    const headers = { ...(options.headers || {}) };
+    const headers = {};
+    if (options.headers) {
+      try {
+        // Headers / Map / 数组 / 普通对象都归一成普通对象；直接 spread Headers 会得到空对象。
+        new Headers(options.headers).forEach((value, key) => { headers[key] = value; });
+      } catch {
+        Object.assign(headers, options.headers);
+      }
+    }
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -80,7 +88,10 @@ function makeFetch() {
         headers: responseHeaders,
         body: text,
         text: async () => text,
-        json: async () => { try { return JSON.parse(text); } catch { return {}; } },
+        json: async () => {
+          try { return JSON.parse(text); }
+          catch { throw fail("INVALID_RESPONSE", "源接口返回的不是合法 JSON"); }
+        },
         arrayBuffer: async () => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
       };
     } catch (error) {

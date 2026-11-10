@@ -5,6 +5,10 @@ import { assertPublicUrl } from "./net.mjs";
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+function cleanUa(value) {
+  return String(value || "").replace(/[\r\n]/g, "").trim().slice(0, 300);
+}
+
 function upstreamHeaders(referer, extra) {
   const headers = { "user-agent": UA, ...(extra || {}) };
   if (referer) {
@@ -15,9 +19,10 @@ function upstreamHeaders(referer, extra) {
 }
 
 // 透传 Range 的视频代理：浏览器只连本站，避免 CORS 与防盗链。
-export async function proxyMedia(req, res, { url, referer }) {
+export async function proxyMedia(req, res, { url, referer, ua }) {
   assertPublicUrl(url, "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）");
-  const headers = upstreamHeaders(referer);
+  const userAgent = cleanUa(ua);
+  const headers = upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null);
   if (req.headers.range) headers.range = req.headers.range;
 
   const controller = new AbortController();
@@ -52,12 +57,13 @@ export async function proxyMedia(req, res, { url, referer }) {
 
 // HLS 清单重写：把分片与子清单全部改成本站代理地址。
 // token 用于在开了访问口令时把鉴权参数带到后续分片请求（浏览器媒体请求无法带 Authorization 头）。
-export async function proxyHls(req, res, { url, referer, token }) {
+export async function proxyHls(req, res, { url, referer, token, ua }) {
   assertPublicUrl(url, "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）");
+  const userAgent = cleanUa(ua);
   let upstream;
   try {
     upstream = await fetch(url, {
-      headers: upstreamHeaders(referer),
+      headers: upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null),
       redirect: "follow",
       signal: AbortSignal.timeout(15000),
     });
@@ -71,7 +77,8 @@ export async function proxyHls(req, res, { url, referer, token }) {
   const text = await upstream.text();
   const suffix =
     (referer ? "&r=" + encodeURIComponent(referer) : "") +
-    (token ? "&token=" + encodeURIComponent(token) : "");
+    (token ? "&token=" + encodeURIComponent(token) : "") +
+    (userAgent ? "&ua=" + encodeURIComponent(userAgent) : "");
   const rewrite = (raw) => {
     let abs;
     try {

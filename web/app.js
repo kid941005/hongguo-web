@@ -547,8 +547,10 @@
     setAutoMore(true);
     var done = function () { state.loadingMore = false; setAutoMore(false); };
     return req.then(function (r) {
-      state.hasMore = !!r.hasMore;
-      renderItems(r.items || [], true);
+      var incoming = r.items || [];
+      // 有的源会返回空列表却仍报 hasMore=true，这里强制收尾，避免无限加载。
+      state.hasMore = incoming.length ? !!r.hasMore : false;
+      renderItems(incoming, true);
       if (state.mode === 'search') { if (r.aggregate) showNotice(aggNote(r)); else if (r.fallback) showNotice(searchNote(r)); }
       done();
     }).catch(function (e) { state.page -= 1; done(); showError(e); });
@@ -717,7 +719,9 @@
   var RATE_KEY = 'hg_rate_v1';
 
   function loadRate() {
-    var r = parseFloat(localStorage.getItem(RATE_KEY) || '1');
+    var raw = '1';
+    try { raw = localStorage.getItem(RATE_KEY) || '1'; } catch (e) { /* 隐私模式/localStorage 被禁用 */ }
+    var r = parseFloat(raw);
     if (!isFinite(r) || RATES.indexOf(r) === -1) r = 1;
     state.rate = r;
     return r;
@@ -807,6 +811,9 @@
     state.levels = [];
     updateQualityBtn();
     destroyHls();
+    // 从直链切到 HLS（或反过来）时先清掉旧的 src，避免残留地址干扰新的播放源。
+    v.removeAttribute('src');
+    try { v.load(); } catch (e) {}
     $('player').classList.remove('hidden');
     if (type === 'hls') {
       if (window.Hls && window.Hls.isSupported()) {
@@ -841,12 +848,17 @@
     state.autoNextLatch = false;
     var p = v.play();
     if (p && p.catch) p.catch(function (err) {
+      if (!err) return;
       // 自动连播没有用户手势，部分移动端浏览器会以 NotAllowedError 拦截有声播放；静音重试一次
-      if (!auto || !err || err.name !== 'NotAllowedError' || v.muted) return;
-      v.muted = true;
-      var retry = v.play();
-      if (retry && retry.catch) retry.catch(function () {});
-      toast('已静音自动续播，点音量可恢复声音');
+      if (err.name === 'NotAllowedError') {
+        if (!auto || v.muted) return;
+        v.muted = true;
+        var retry = v.play();
+        if (retry && retry.catch) retry.catch(function () {});
+        toast('已静音自动续播，点音量可恢复声音');
+        return;
+      }
+      toast('播放失败：' + (err.message || '未知错误'));
     });
   }
 

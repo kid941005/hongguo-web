@@ -284,6 +284,11 @@ export class SourceManager {
     if (problems.length) throw fail("INVALID_SOURCE", problems.join("；"));
     const existing = this.get(meta.id);
     if (existing && existing.builtin) throw fail("PROTECTED", "内置源不能覆盖，请换一个 id");
+    // 覆盖安装前先备份旧源码：新源自检失败时恢复，避免把用户原来的可用源一起弄丢。
+    let previous = null;
+    if (existing && !existing.builtin) {
+      try { previous = fs.readFileSync(existing.file, "utf8"); } catch { previous = null; }
+    }
 
     this.writeSource(meta.id, source);
     this.runtimes.delete(meta.id);
@@ -293,7 +298,15 @@ export class SourceManager {
     try {
       await runtime.call("home", [{}, false], SELF_TEST_TIMEOUT);
     } catch (error) {
-      runtime.pushLog("初始化自检失败: " + ((error && error.message) || error));
+      // 自检失败必须回滚：否则坏源会留在 data/sources，之后每次启动扫描都会带着它。
+      if (previous !== null) {
+        try { fs.writeFileSync(entry.file, previous); } catch { /* 恢复失败也不能掩盖原始错误 */ }
+      } else {
+        try { fs.unlinkSync(entry.file); } catch { /* 文件可能已被外部删除 */ }
+      }
+      this.runtimes.delete(meta.id);
+      this.scan();
+      throw fail("INVALID_SOURCE", "源初始化失败: " + ((error && error.message) || error));
     }
 
     const updateUrl = String(url || meta.updateUrl || "").trim();
