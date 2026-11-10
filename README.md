@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.0","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.1","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.0
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.1
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -224,6 +224,7 @@ var spider = {
   },
   detail: function (id) {                                       // 详情 + 播放串
     return { list: [{ vod_id: id, vod_name: "剧名",               // 必须放 list[0]，返回 {vod:{...}} 不被识别
+      vod_tag: "都市/甜宠",                                     // 可选，多个用 / 分隔
       vod_play_from: "线路A",                                   // 多个用 $$$
       vod_play_url: "第1集$ep1#第2集$ep2" }] };                  // 集用 #，集名与集ID 用 $
   },
@@ -272,7 +273,7 @@ var spider = {
 | GET | `/api/recommend?page=` | 推荐页：内置红果四榜单按真实评分合并排序（`items[].score/heat/bang`） |
 | GET | `/api/category?source=&tid=&page=` | 分类列表 |
 | GET | `/api/search?source=&q=&page=` | 搜索；`source=__all`（或 `all=1`）为多源聚合，返回 `{aggregate:true, groups:[{source,name,count,ms,hasMore,error}]}` |
-| GET | `/api/detail?source=&id=` | 详情（含线路与剧集） |
+| GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集） |
 | GET | `/api/play?source=&flag=&id=` | 取播放地址（返回 `{type,url}`） |
 | GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer，`token` 为应用访问口令） |
 | GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带上 token） |

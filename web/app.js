@@ -406,6 +406,22 @@
 
   function posterUrl(src) { return src || PLACEHOLDER; }
 
+  function tagList(tags) {
+    if (Array.isArray(tags)) return tags.map(function (t) { return String(t || '').trim(); }).filter(Boolean);
+    if (typeof tags === 'string') return tags.split(/[\/,，|]/).map(function (t) { return String(t || '').trim(); }).filter(Boolean);
+    return [];
+  }
+
+  function renderTagEls(box, tags, cls, max) {
+    var list = tagList(tags).slice(0, max || 30);
+    box.textContent = '';
+    list.forEach(function (text) {
+      var el = document.createElement('span'); el.className = cls; el.textContent = text; box.appendChild(el);
+    });
+    box.classList.toggle('hidden', !list.length);
+    return list.length;
+  }
+
   function makeCard(item) {
     var card = document.createElement('div'); card.className = 'card';
     var img = document.createElement('img'); img.className = 'poster'; img.loading = 'lazy';
@@ -429,6 +445,8 @@
     var t = document.createElement('div'); t.className = 'ctitle'; t.textContent = item.title || '未命名';
     var r = document.createElement('div'); r.className = 'crem'; r.textContent = item.remarks || '';
     body.appendChild(t); body.appendChild(r);
+    var ct = document.createElement('div'); ct.className = 'ctags';
+    if (renderTagEls(ct, item.tags, 'ctag', 3)) body.appendChild(ct);
     card.appendChild(img); card.appendChild(body);
     card.addEventListener('click', function () { openDetail(item.id, item.source || ''); });
     return card;
@@ -606,13 +624,14 @@
   function openDetail(id, src) {
     state.viewSource = src || (state.source === '__all' ? '' : cur());
     setView('detail');
-    $('dTitle').textContent = '加载中…'; $('dMeta').textContent = ''; $('dDesc').textContent = '';
+    $('dTitle').textContent = '加载中…'; $('dMeta').textContent = ''; $('dDesc').textContent = ''; $('dTags').textContent = '';
     $('dCover').src = PLACEHOLDER; $('dEps').textContent = ''; $('dLines').textContent = '';
     api('/api/detail', { source: state.viewSource, id: id }).then(function (d) {
       state.detail = d; state.line = 0;
       if (d.source) state.viewSource = d.source;
       $('dTitle').textContent = d.title || '未命名';
       $('dMeta').textContent = d.remarks || '';
+      renderTagEls($('dTags'), d.tags, 'dtag');
       $('dDesc').textContent = d.desc || '';
       var cover = d.cover || '';
       $('dCover').src = posterUrl(cover);

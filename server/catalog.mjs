@@ -12,6 +12,14 @@ function pick(...values) {
   return "";
 }
 
+// 标签兼容数组与「a/b/c」「a,b,c」字符串，统一成字符串数组。
+function normTags(value) {
+  const list = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\/,，|]/) : [];
+  return (Array.isArray(list) ? list : [])
+    .map((tag) => String(tag || "").trim())
+    .filter(Boolean);
+}
+
 function normVod(vod) {
   if (!vod || typeof vod !== "object") return null;
   const id = String(pick(vod.vod_id, vod.id, vod.vid));
@@ -22,6 +30,7 @@ function normVod(vod) {
     title: String(pick(vod.vod_name, vod.title, vod.name)),
     cover: String(pick(vod.vod_pic, vod.cover, vod.img, vod.pic)),
     remarks: String(pick(vod.vod_remarks, vod.badge, vod.remarks, vod.note)),
+    tags: normTags(pick(vod.tags, vod.vod_tag, vod.vod_tags, vod.tag)),
     year: String(pick(vod.vod_year, vod.year)),
     area: String(pick(vod.vod_area, vod.area)),
     desc: String(pick(vod.vod_content, vod.description, vod.desc)),
@@ -234,6 +243,7 @@ export function createCatalog({ provider, sources }) {
         cover: data.cover,
         desc: data.description || "",
         remarks: data.badge || "",
+        tags: normTags(data.tags),
         lines: episodes.length ? [{ flag: "hg", name: "红果（服务端解密）", episodes }] : [],
         episodes,
       };
@@ -257,6 +267,7 @@ export function createCatalog({ provider, sources }) {
       cover: norm.cover,
       desc: norm.desc,
       remarks: norm.remarks,
+      tags: norm.tags,
       lines,
       episodes: lines.length ? lines[0].episodes : [],
     };
