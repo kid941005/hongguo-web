@@ -18,6 +18,8 @@ const context = vm.createContext({
   Buffer,
   URL,
   URLSearchParams,
+  log: () => {},
+  setResult: (value) => value,
   axios: axios.create({
     timeout: 30000,
     maxContentLength: 16 * 1024 * 1024,
@@ -26,7 +28,7 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS};",
   context,
   { timeout: 5000 }
 );
@@ -117,7 +119,42 @@ export const provider = {
       data?.loaderData?.category_page || data?.loaderData?.["category_$"];
     if (!Array.isArray(pageData?.recommendList))
       throw new Error("首页数据结构已变化");
-    return { items: cards(pageData.recommendList.map(api.itemToCard)), page };
+    return {
+      items: cards(pageData.recommendList.map(api.itemToCard)),
+      page,
+      classes: api.CATEGORIES.map((entry) => ({
+        id: String(entry.type_id),
+        name: String(entry.type_name || entry.type_id),
+      })),
+      filters: api.FILTERS,
+    };
+  },
+  async category(typeId, page = 1, filters = {}) {
+    const id = String(typeId || "short");
+    const config = api.CATEGORY_CONFIG[id] || api.CATEGORY_CONFIG.short;
+    if (!config) throw new Error("未知分类");
+    if (config.kind === "category") {
+      const query = new URLSearchParams(config.query || "");
+      for (const [key, value] of Object.entries(filters || {})) {
+        if (value === undefined || value === null || value === "") continue;
+        query.set(key, String(value));
+      }
+      const data = await api.categoryPage(query.toString(), page);
+      const pageData =
+        data?.loaderData?.category_page || data?.loaderData?.["category_$"];
+      const rows = pageData?.recommendList || pageData?.categoryData?.recommendList;
+      if (!Array.isArray(rows)) throw new Error("分类数据结构已变化");
+      const pagination = pageData?.pagination || {};
+      const totalPages = Number(pagination.totalPages) || 0;
+      return {
+        items: cards(rows.map(api.itemToCard)),
+        page,
+        hasMore: totalPages ? page < totalPages : rows.length >= 24,
+      };
+    }
+    const rows = await api.rule["一级"](id, page, {}, filters || {});
+    const items = cards(Array.isArray(rows) ? rows : []);
+    return { items, page, hasMore: items.length >= 20 };
   },
   async search(keyword, page = 1) {
     try {

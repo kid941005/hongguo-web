@@ -25,6 +25,9 @@ const MAX_PAGE = 50;
 const TTL = 30 * 60 * 1000;
 const SESSION_TTL = 55 * 60 * 1000;
 const states = new Map();
+const coverCache = new Map();
+const COVER_TTL = 6 * 60 * 60 * 1000;
+const COVER_BAD_HOST = /cattleduanju\.oss-cn-beijing\.aliyuncs\.com/i;
 
 const CATE_FALLBACK = ["现言", "古言", "历史", "都市", "亲情", "玄幻", "热血", "喜剧", "悬疑", "其他剧情"];
 const CSJ_KEYS = {
@@ -483,6 +486,75 @@ async function csjDetail(thirdPlayId, index, retried) {
   return data || {};
 }
 
+/* ---------------- 封面修复（上游图床已停用，改从 CSJ 取封面） ---------------- */
+function cachedCover(id) {
+  const entry = coverCache.get(id);
+  if (entry && Date.now() - entry.at < COVER_TTL) return entry.url;
+  if (entry) coverCache.delete(id);
+  return "";
+}
+function cacheCover(id, url) {
+  if (!url) return;
+  coverCache.set(id, { url: url, at: Date.now() });
+  while (coverCache.size > 600) coverCache.delete(coverCache.keys().next().value);
+}
+async function fetchCsjCover(thirdPlayId) {
+  const data = await csjDetail(thirdPlayId, 1, false);
+  const item = data && data.data && data.data.list && data.data.list[0];
+  if (!item) return "";
+  const v2 = item.cover_image_v2s;
+  if (Array.isArray(v2) && v2.length) {
+    for (let i = v2.length - 1; i >= 0; i--) {
+      const node = v2[i] || {};
+      const url = text(node.main_url) || text(node.backup_url);
+      if (/^https?:\/\//i.test(url)) return url;
+    }
+  }
+  return text(item.cover_image);
+}
+async function resolveCover(id) {
+  const did = text(id).trim();
+  if (!did) return "";
+  const hit = cachedCover(did);
+  if (hit) return hit;
+  let thirdPlayId = "";
+  try {
+    const r = await requestJson(HOST + "/api/v1/app/play/movieDetails", {
+      method: "POST",
+      body: JSON.stringify({ id: did, source: 0, typeId: "S1", userId: "223664" })
+    });
+    thirdPlayId = text(r && r.data && r.data.thirdPlayId);
+  } catch (e) {}
+  if (!thirdPlayId) return "";
+  try {
+    const url = await fetchCsjCover(thirdPlayId);
+    if (url) { cacheCover(did, url); return url; }
+  } catch (e) {}
+  return "";
+}
+function needsCover(item) {
+  const cover = text(item && item.vod_pic);
+  return !cover || COVER_BAD_HOST.test(cover);
+}
+async function enrichCovers(list) {
+  const targets = list.filter(needsCover);
+  if (!targets.length) return list;
+  let cursor = 0;
+  const limit = Math.min(5, targets.length);
+  const worker = async function () {
+    while (cursor < targets.length) {
+      const item = targets[cursor++];
+      try {
+        const url = await resolveCover(item.vod_id);
+        if (url) item.vod_pic = url;
+      } catch (e) {}
+    }
+  };
+  const jobs = [];
+  for (let i = 0; i < limit; i++) jobs.push(worker());
+  await Promise.all(jobs);
+  return list;
+}
 function extractVideoUrl(videoModel) {
   try {
     const list = videoModel && videoModel.video_list;
@@ -514,13 +586,13 @@ function toItem(item) {
     vod_remarks: remarks.join(" · ")
   };
 }
-function mapRecords(rows) {
+async function mapRecords(rows) {
   const list = [];
   for (let i = 0; i < (rows || []).length; i++) {
     const item = toItem(rows[i]);
     if (item.vod_id) list.push(item);
   }
-  return list;
+  return await enrichCovers(list);
 }
 
 function init(extend) {
@@ -566,7 +638,7 @@ async function category(tid, page, filter, extend) {
       body: JSON.stringify({ condition: { classify: area, typeId: "S1" }, pageNum: current, pageSize: PAGE_SIZE })
     });
     const payload = data.data || {};
-    const list = mapRecords(payload.records || []);
+    const list = await mapRecords(payload.records || []);
     const total = number(payload.total);
     const hasMore = total > 0 ? current * PAGE_SIZE < total : list.length >= PAGE_SIZE;
     return packPage(state, current, list, hasMore);
@@ -588,7 +660,7 @@ async function search(keyword, quick, page) {
       body: JSON.stringify({ condition: { value: word, typeId: "S1" }, pageNum: current, pageSize: SEARCH_SIZE })
     });
     const payload = data.data || {};
-    const list = mapRecords(payload.records || []);
+    const list = await mapRecords(payload.records || []);
     const total = number(payload.total);
     const hasMore = total > 0 ? current * SEARCH_SIZE < total : list.length >= SEARCH_SIZE;
     return packPage(state, current, list, hasMore);
@@ -645,6 +717,18 @@ async function detail(id) {
     } catch (e) {}
   }
 
+  let cover = text(desc.cover) || text(info.cover);
+  if (!cover || COVER_BAD_HOST.test(cover)) {
+    const thirdPlayId = text(info.thirdPlayId);
+    if (thirdPlayId) {
+      try { const fixed = await fetchCsjCover(thirdPlayId); if (fixed) { cover = fixed; cacheCover(did, fixed); } } catch (e) {}
+    }
+    if (!cover || COVER_BAD_HOST.test(cover)) {
+      const fixed = await resolveCover(did);
+      if (fixed) cover = fixed;
+    }
+  }
+
   const total = number(desc.totalEpisode) || number(info.totalEpisode) || episodes.length;
   const remarks = [];
   if (total > 0) remarks.push("共" + total + "集");
@@ -655,7 +739,7 @@ async function detail(id) {
     list: [{
       vod_id: did,
       vod_name: cleanText(desc.name) || cleanText(info.name) || ("短剧 " + did),
-      vod_pic: text(desc.cover) || text(info.cover),
+      vod_pic: cover,
       vod_content: cleanText(desc.introduce) || cleanText(info.introduce),
       vod_remarks: remarks.join(" · "),
       vod_play_from: "牛牛短剧",

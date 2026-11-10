@@ -133,7 +133,7 @@ export class SourceManager {
       type: "builtin",
       builtin: true,
       file: "",
-      hasCategories: false,
+      hasCategories: true,
       updateUrl: "",
     });
 

@@ -176,7 +176,20 @@ export function createCatalog({ provider, sources }) {
     if (entry.type === "builtin") {
       const data = await withTimeout(provider.home(pageNo), 30000, "首页加载超时");
       const items = toItems(data.items);
-      return { source: entry.id, kind: "builtin", classes: [], items, page: pageNo, hasMore: items.length >= 20 };
+      const classes = Array.isArray(data.classes)
+        ? data.classes
+          .filter((c) => c && c.id !== undefined)
+          .map((c) => ({ id: String(c.id), name: String(c.name || c.id) }))
+        : [];
+      return {
+        source: entry.id,
+        kind: "builtin",
+        classes,
+        items,
+        page: pageNo,
+        hasMore: items.length >= 20,
+        filters: data.filters || {},
+      };
     }
     const runtime = sources.runtime(entry.id);
     const result = await runtime.call("home", [{}, false], TIMEOUT_HOME);
@@ -211,6 +224,21 @@ export function createCatalog({ provider, sources }) {
     const entry = entryOf(sourceId);
     const pageNo = Number(page) || 1;
     if (entry.type === "builtin") {
+      if (typeof provider.category === "function") {
+        const data = await withTimeout(
+          provider.category(String(tid), pageNo, extend || {}),
+          40000,
+          "分类加载超时"
+        );
+        const items = toItems(data.items);
+        return {
+          source: entry.id,
+          tid,
+          items,
+          page: pageNo,
+          hasMore: Boolean(data.hasMore),
+        };
+      }
       const data = await withTimeout(provider.home(pageNo), 30000, "分类加载超时");
       const items = toItems(data.items);
       return { source: entry.id, tid, items, page: pageNo, hasMore: items.length >= 20, classes: [] };
