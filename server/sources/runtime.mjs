@@ -1,7 +1,7 @@
 import vm from "node:vm";
 import { htmlShim } from "./shims.js";
 import { fail } from "../errors.mjs";
-import { assertPublicUrl, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
+import { safeFetch, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 
 // 元信息与核心方法约定，与糖葫芦（THLRedGuo / CatPaw）单文件源保持一致。
 const RE_ID = /\bid\s*:\s*["']([^"']+)["']/;
@@ -11,8 +11,6 @@ const RE_UPDATE_URL = /\bupdateUrl\s*:\s*["']([^"']+)["']/;
 const CORE_METHODS = ["home", "category", "detail", "search", "play"];
 const LOG_LIMIT = 120;
 const LOG_CHARS = 400;
-
-const nodeFetch = globalThis.fetch;
 
 export function parseMeta(code) {
   const id = RE_ID.exec(code);
@@ -60,23 +58,21 @@ function makeFetch() {
       }
     }
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 12000;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const url = assertPublicUrl(rawUrl, "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）", PRIVATE_FETCH_ALLOWED);
       let body = options.body;
       if (body && typeof body === "object" && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
         try { body = JSON.stringify(body); } catch { body = String(body); }
       }
-      const response = await nodeFetch(url, {
+      const response = await safeFetch(rawUrl, {
         method,
         headers,
         body,
         redirect: options.redirect || "follow",
-        signal: controller.signal,
+        timeoutMs,
+        allowPrivate: PRIVATE_FETCH_ALLOWED,
+        message: "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）",
       });
-      assertPublicUrl(response.url || url, "源请求跳转到了内网地址", PRIVATE_FETCH_ALLOWED);
       const buffer = Buffer.from(await response.arrayBuffer());
       const text = buffer.toString("utf8");
       const responseHeaders = {};
@@ -84,7 +80,7 @@ function makeFetch() {
       return {
         status: response.status,
         ok: response.ok,
-        url: response.url || url,
+        url: response.url,
         headers: responseHeaders,
         body: text,
         text: async () => text,
@@ -96,12 +92,10 @@ function makeFetch() {
       };
     } catch (error) {
       if (error && error.code === "BAD_URL") throw error;
-      const aborted = error && error.name === "AbortError";
+      const aborted = error && (error.code === "TIMEOUT" || error.name === "AbortError" || error.name === "TimeoutError");
       const failure = new Error(aborted ? "网络请求超时" : "网络请求失败");
       failure.code = aborted ? "TIMEOUT" : "HTTP_0";
       throw failure;
-    } finally {
-      clearTimeout(timer);
     }
   };
 }

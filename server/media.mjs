@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { fail } from "./errors.mjs";
-import { assertPublicUrl } from "./net.mjs";
+import { safeFetch } from "./net.mjs";
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -20,23 +20,23 @@ function upstreamHeaders(referer, extra) {
 
 // 透传 Range 的视频代理：浏览器只连本站，避免 CORS 与防盗链。
 export async function proxyMedia(req, res, { url, referer, ua }) {
-  assertPublicUrl(url, "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）");
   const userAgent = cleanUa(ua);
   const headers = upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null);
   if (req.headers.range) headers.range = req.headers.range;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
   let upstream;
   try {
-    upstream = await fetch(url, { headers, redirect: "follow", signal: controller.signal });
+    // safeFetch 对每次连接和每次重定向都做 DNS 校验，并把连接固定到已校验的地址。
+    upstream = await safeFetch(url, {
+      headers,
+      redirect: "follow",
+      timeoutMs: 20000,
+      message: "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）",
+    });
   } catch (error) {
-    throw fail(error && error.name === "AbortError" ? "TIMEOUT" : "UPSTREAM", "媒体上游请求失败");
-  } finally {
-    clearTimeout(timer);
+    if (error && error.code === "BAD_URL") throw error;
+    throw fail(error && error.code === "TIMEOUT" ? "TIMEOUT" : "UPSTREAM", "媒体上游请求失败");
   }
-  // redirect: follow 可能跳到内网，必须在拿到最终 URL 后再校验一次。
-  assertPublicUrl(upstream.url || url, "媒体上游跳转到了内网地址");
 
   const out = {};
   for (const key of ["content-type", "content-length", "accept-ranges", "content-range", "etag", "last-modified"]) {
@@ -58,20 +58,23 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
 // HLS 清单重写：把分片与子清单全部改成本站代理地址。
 // token 用于在开了访问口令时把鉴权参数带到后续分片请求（浏览器媒体请求无法带 Authorization 头）。
 export async function proxyHls(req, res, { url, referer, token, ua }) {
-  assertPublicUrl(url, "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）");
   const userAgent = cleanUa(ua);
   let upstream;
   try {
-    upstream = await fetch(url, {
+    upstream = await safeFetch(url, {
       headers: upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null),
       redirect: "follow",
-      signal: AbortSignal.timeout(15000),
+      timeoutMs: 15000,
+      message: "不允许代理内网地址（如确需内网媒体服务器，设置 ALLOW_PRIVATE_MEDIA=1）",
     });
   } catch (error) {
-    throw fail(error && (error.name === "AbortError" || error.name === "TimeoutError") ? "TIMEOUT" : "UPSTREAM", "清单拉取失败");
+    if (error && error.code === "BAD_URL") throw error;
+    throw fail(error && error.code === "TIMEOUT" ? "TIMEOUT" : "UPSTREAM", "清单拉取失败");
   }
-  assertPublicUrl(upstream.url || url, "清单上游跳转到了内网地址");
-  if (!upstream.ok) throw fail("UPSTREAM", "清单拉取失败: HTTP " + upstream.status);
+  if (!upstream.ok) {
+    upstream.discard();
+    throw fail("UPSTREAM", "清单拉取失败: HTTP " + upstream.status);
+  }
 
   const base = upstream.url || url;
   const text = await upstream.text();

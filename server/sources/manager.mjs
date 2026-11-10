@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { SourceRuntime, parseMeta, validateMeta } from "./runtime.mjs";
 import { fail } from "../errors.mjs";
-import { assertPublicUrl, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
+import { safeFetch, PRIVATE_FETCH_ALLOWED } from "../net.mjs";
 
 const BUILTIN_ID = "hongguo";
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -225,16 +225,21 @@ export class SourceManager {
 
   async fetchSource(url, { etag = "" } = {}) {
     const target = String(url);
-    assertPublicUrl(target, "不允许下载内网地址的源（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）", PRIVATE_FETCH_ALLOWED);
     const headers = { "user-agent": "hongguo-web-source-updater" };
     if (etag) headers["if-none-match"] = etag;
     let response;
     try {
-      response = await fetch(target, { redirect: "follow", headers, signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT) });
-    } catch {
+      response = await safeFetch(target, {
+        redirect: "follow",
+        headers,
+        timeoutMs: DOWNLOAD_TIMEOUT,
+        allowPrivate: PRIVATE_FETCH_ALLOWED,
+        message: "不允许下载内网地址的源（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）",
+      });
+    } catch (error) {
+      if (error && error.code === "BAD_URL") throw error;
       throw fail("DOWNLOAD", "下载源失败：网络错误或超时");
     }
-    assertPublicUrl(response.url || target, "源下载跳转到了内网地址", PRIVATE_FETCH_ALLOWED);
     if (response.status === 304) {
       return { notModified: true, etag, finalUrl: response.url || target };
     }
