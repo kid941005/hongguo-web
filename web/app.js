@@ -9,7 +9,7 @@
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [],
-    loadingMore: false,
+    loadingMore: false, autoNextLatch: false,
     user: null, favs: [], follows: []
   };
 
@@ -688,10 +688,12 @@
     for (var i = 0; i < kids.length; i++) kids[i].classList.toggle('active', i === epIdx && state.line === lineIdx);
   }
 
-  function playEpisode(lineIdx, epIdx, startAt) {
+  function playEpisode(lineIdx, epIdx, startAt, auto) {
+    var autoNext = auto === true;
     var d = state.detail; if (!d) return;
     var line = d.lines[lineIdx]; if (!line) return;
     var ep = line.episodes[epIdx]; if (!ep) return;
+    state.autoNextLatch = false;
     state.line = lineIdx; state.epIdx = epIdx;
     markActiveEp(lineIdx, epIdx);
     $('pTitle').textContent = (d.title || '') + ' · ' + (ep.name || '');
@@ -701,10 +703,13 @@
       pos: Math.max(0, Math.floor(startAt || 0)), dur: 0
     });
     updateResumeBar(d);
-    toast('正在解析播放地址…');
+    if (!autoNext) toast('正在解析播放地址…');
     api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id }).then(function (r) {
-      openPlayer(r.url, r.type, startAt);
-    }).catch(function (e) { showError(e); });
+      openPlayer(r.url, r.type, startAt, autoNext);
+    }).catch(function (e) {
+      if (autoNext) toast('下一集播放失败：' + ((e && e.message) || '未知错误'));
+      else showError(e);
+    });
   }
 
   // ---- 倍速 ----
@@ -793,7 +798,7 @@
     if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   }
 
-  function openPlayer(url, type, startAt) {
+  function openPlayer(url, type, startAt, auto) {
     var v = $('video');
     url = authUrl(url);
     state.pendingSeek = Math.max(0, Math.floor(startAt || 0));
@@ -833,7 +838,16 @@
       v.src = url;
     }
     applyRate();
-    var p = v.play(); if (p && p.catch) p.catch(function () {});
+    state.autoNextLatch = false;
+    var p = v.play();
+    if (p && p.catch) p.catch(function (err) {
+      // 自动连播没有用户手势，部分移动端浏览器会以 NotAllowedError 拦截有声播放；静音重试一次
+      if (!auto || !err || err.name !== 'NotAllowedError' || v.muted) return;
+      v.muted = true;
+      var retry = v.play();
+      if (retry && retry.catch) retry.catch(function () {});
+      toast('已静音自动续播，点音量可恢复声音');
+    });
   }
 
   function saveProgress(v) {
@@ -842,6 +856,28 @@
     var pos = Math.floor(v.currentTime || 0), dur = 0;
     if (v.duration && isFinite(v.duration)) dur = Math.floor(v.duration);
     if (pos > 0) histUpdate(pos, dur);
+  }
+
+  function canAutoNext() {
+    var d = state.detail; if (!d) return false;
+    var line = d.lines[state.line]; if (!line) return false;
+    return (state.epIdx || 0) + 1 < line.episodes.length;
+  }
+
+  // 片尾自动连播：ended 事件在某些浏览器/HLS 场景不稳定，timeupdate 临近片尾作为兜底。
+  function scheduleAutoNext() {
+    if (state.autoNextLatch) return;
+    if ($('player').classList.contains('hidden')) return;
+    if (!canAutoNext()) return;
+    var key = String(state.line) + ':' + String(state.epIdx);
+    state.autoNextLatch = true;
+    setTimeout(function () {
+      if ($('player').classList.contains('hidden') || String(state.line) + ':' + String(state.epIdx) !== key) {
+        state.autoNextLatch = false;
+        return;
+      }
+      nextEpisode({ auto: true });
+    }, 300);
   }
 
   function bindPlayerEvents() {
@@ -860,18 +896,17 @@
       state.lastSave = now;
       saveProgress(v);
     });
+    // 临近片尾兜底：有些浏览器/流不会稳定触发 ended，用 timeupdate 补一次。
+    v.addEventListener('timeupdate', function () {
+      if (v.paused || v.seeking) return;
+      if (!isFinite(v.duration) || v.duration <= 1) return;
+      if (v.currentTime > 0 && v.duration - v.currentTime <= 0.6) scheduleAutoNext();
+    });
     v.addEventListener('pause', function () { saveProgress(v); });
     v.addEventListener('ended', function () {
       var dur = Math.floor(v.duration || 0);
       if (state.histKey) histUpdate(dur, dur);
-      // 片尾自动播放下一集；延迟期间若用户已手动切集/关闭播放器则不再触发
-      var endedEp = state.epIdx;
-      if (!$('player').classList.contains('hidden')) {
-        setTimeout(function () {
-          if ($('player').classList.contains('hidden') || state.epIdx !== endedEp) return;
-          nextEpisode();
-        }, 350);
-      }
+      scheduleAutoNext();
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
     document.addEventListener('keydown', onPlayerKey);
@@ -914,6 +949,7 @@
 
   function closePlayer() {
     var v = $('video');
+    state.autoNextLatch = false;
     saveProgress(v);
     try { v.pause(); } catch (e) {}
     v.removeAttribute('src'); try { v.load(); } catch (e) {}
@@ -921,12 +957,17 @@
     $('player').classList.add('hidden');
   }
 
-  function nextEpisode() {
+  function nextEpisode(opts) {
+    var auto = !!(opts && opts.auto);
     var d = state.detail; if (!d) return;
     var line = d.lines[state.line]; if (!line) return;
     var next = (state.epIdx || 0) + 1;
-    if (next >= line.episodes.length) { toast('已经是最后一集'); return; }
-    playEpisode(state.line, next);
+    if (next >= line.episodes.length) {
+      state.autoNextLatch = false;
+      if (!auto) toast('已经是最后一集');
+      return;
+    }
+    playEpisode(state.line, next, 0, auto);
   }
 
   function showError(e) {
@@ -1272,6 +1313,11 @@
   loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion();
   // PWA：注册 service worker（仅 http(s) 下有效）
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    var hadSwController = !!navigator.serviceWorker.controller;
+    // 新版本 Service Worker 接管后自动刷新一次，避免 PWA 长期停留在旧 app.js
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (hadSwController) location.reload();
+    });
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });
   }
   loadSources().then(function () {
