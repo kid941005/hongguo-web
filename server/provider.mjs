@@ -243,7 +243,7 @@ export const provider = {
         METRICS.lastError = message;
         METRICS.lastErrorAt = Date.now();
       }
-      if (/空响应|video_model|video_tab|device_register/.test(message)) {
+      if (/空响应|video_model|video_tab|device_register|web 播放/.test(message)) {
         if (track) METRICS.empty += 1;
         if (track && STREAM_BREAKER.fails >= STREAM_BREAKER_THRESHOLD) {
           STREAM_BREAKER.openUntil = Date.now() + STREAM_BREAKER_COOLDOWN;

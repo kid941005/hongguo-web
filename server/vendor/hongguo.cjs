@@ -17,8 +17,10 @@
 // 播放层：video_model 拿清晰度 → fallback_api 拿 video_list → spade URL 解密 → spade_a 派生 CENC 内容密钥；
 //        proxy_rule 按客户端 __range 拉远端 1MB 段、AES-128-CTR 逐样本解密后 base64 回传（206 分段，免落盘秒开）。
 // 依赖沙箱能力：require('node:crypto')（rootRequire 直通）、Buffer、axios；Node<18 无 SM3 会签名失败。
-// 本地修改（hongguo-web，2026-11）：播放取址改走 video_tab 接口（每次新注册设备身份 + tab 签名 + codec_type=3 兜底），
-//         其余数据层/签名层/解密层未改；上游原始与 GPL-3.0 许可见同目录 NOTICE.md 与 LICENSE.drpys。
+// 本地修改（hongguo-web，2026-11）：播放取址优先走官网网页播放器通道
+//         （POST https://hongguoduanju.com/api/video/protected/fallback-play-info，返回明文 mp4，无需签名/设备注册/CENC 解密），
+//         失败再回落到 App 侧 video_tab / multi_video_model 链路；其余数据层/签名层/解密层未改；
+//         上游原始与 GPL-3.0 许可见同目录 NOTICE.md 与 LICENSE.drpys。
 
 const crypto = require('node:crypto');
 
@@ -32,6 +34,11 @@ const PLAYBACK_HOST = 'api5-normal-sinfonlineb.fqnovel.com';
 const PLAYBACK_HOST_ALT = 'api5-normal-hl.fqnovel.com';
 // 2026-11-10 起 multi_video_model 全族被关闭（HTTP 200 + 0 字节），改走官方 App 的 video_tab 接口。
 const PLAYBACK_TAB_PATH = '/reading/bookapi/video_tab/multi_video_model/v1/';
+// 2026-11-11 起 video_tab 亦被关闭（HTTP 200 + 0 字节），改走官网网页播放器通道：
+// POST {item_id} → main_url，返回明文 mp4（avc1/mp4a，无 CENC），无需签名头，仅需浏览器 UA。
+const WEB_PLAY_API = 'https://hongguoduanju.com/api/video/protected/fallback-play-info';
+const WEB_PLAY_REFERER = 'https://hongguoduanju.com/';
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0';
 const PLAYBACK_DEVICE_PARAMS = {
     ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
     version_code: '71332', version_name: '7.1.3.32', device_platform: 'android',
@@ -953,23 +960,42 @@ function decryptPartial(data, start, key, prepared) {
 
 // ---------- 播放流解析与 Range 代理 ----------
 
+// 官网网页播放器通道：明文 mp4，无需 App 签名与设备注册，是最稳的一条取址路径。
+async function webPlayStream(vid) {
+    const resp = await axios.post(WEB_PLAY_API, { item_id: str(vid) }, {
+        headers: { 'User-Agent': WEB_UA, 'Content-Type': 'application/json', Referer: WEB_PLAY_REFERER, Origin: 'https://hongguoduanju.com' },
+        timeout: 15000, responseType: 'text',
+    });
+    const text = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data || {});
+    if (resp.status !== 200) throw new Error('web 播放接口 HTTP ' + resp.status);
+    const body = jsonBody(text) || {};
+    const url = cleanUrl(body.main_url);
+    if (!/^https?:\/\//i.test(url)) throw new Error('web 播放接口未返回地址' + (body.base_resp && body.base_resp.StatusMessage ? ': ' + body.base_resp.StatusMessage : ''));
+    return { url, quality: '自动', codec: 'h264', ua: WEB_UA, referer: WEB_PLAY_REFERER, key: null, expire: Number(body.url_expire) || 0 };
+}
+
 async function resolveStream(vid, quality) {
-    const cacheKey = playKey(vid, quality); const cached = streamCache.get(cacheKey); if (cached && Date.now() - cached.time < 300000) return cached.value;
-    const { model, info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
-    const selected = rows.find((row) => row.key === wanted || qualityNumber(row.quality) === qualityNumber(wanted)) || rows[0]; if (!selected) throw new Error('没有可用清晰度');
-    const item = selected.item || {};
-    const rawUrl = cleanUrl(item.main_url || item.backup_url);
-    const seed = Buffer.from(str(model.key_seed || info.key_seed), 'base64');
-    let url = rawUrl;
-    if (seed.length && rawUrl) { try { url = decryptSpadeUrl(rawUrl, seed) || rawUrl; } catch { url = rawUrl; } }
-    const spade = item.spade_a || (item.encrypt_info && item.encrypt_info.spade_a);
-    const result = { url, quality: qualityLabel(selected.quality || selected.key), codec: selected.codec === 'hevc' ? 'hevc' : 'h264', ua: PLAYBACK_UA, key: spade ? deriveContentKey(spade) : null };
+    const cacheKey = playKey(vid, quality); const cached = streamCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < 300000 && !(cached.value.expire && Date.now() / 1000 > cached.value.expire - 60)) return cached.value;
+    let result = null; let webError = null;
+    try { result = await webPlayStream(vid); } catch (error) { webError = error; log('红果果web播放通道失败: ' + error.message); }
+    if (!result) {
+        const { model, info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
+        const selected = rows.find((row) => row.key === wanted || qualityNumber(row.quality) === qualityNumber(wanted)) || rows[0]; if (!selected) throw webError || new Error('没有可用清晰度');
+        const item = selected.item || {};
+        const rawUrl = cleanUrl(item.main_url || item.backup_url);
+        const seed = Buffer.from(str(model.key_seed || info.key_seed), 'base64');
+        let url = rawUrl;
+        if (seed.length && rawUrl) { try { url = decryptSpadeUrl(rawUrl, seed) || rawUrl; } catch { url = rawUrl; } }
+        const spade = item.spade_a || (item.encrypt_info && item.encrypt_info.spade_a);
+        result = { url, quality: qualityLabel(selected.quality || selected.key), codec: selected.codec === 'hevc' ? 'hevc' : 'h264', ua: PLAYBACK_UA, key: spade ? deriveContentKey(spade) : null };
+    }
     streamCache.set(cacheKey, { time: Date.now(), value: result }); return result;
 }
 
 async function remoteRange(stream, start, end) {
     const resp = await axios(stream.url, {
-        headers: { 'User-Agent': stream.ua || VIDEO_UA, Referer: 'https://novel.snssdk.com/', Range: `bytes=${start}-${end}` },
+        headers: { 'User-Agent': stream.ua || VIDEO_UA, Referer: stream.referer || 'https://novel.snssdk.com/', Range: `bytes=${start}-${end}` },
         timeout: 30000, responseType: 'arraybuffer',
     });
     let data = Buffer.from(resp.data);

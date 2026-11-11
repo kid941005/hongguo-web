@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.1","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.2","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑四项冒烟（health / 源列表 / 首页 / 源自检）。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.1
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.2
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -188,7 +188,7 @@ hongguo-web/
 ├─ docs/                   # research.md（上游调研）+ screenshots/
 ├─ server/
 │  ├─ index.mjs            # 入口：装配 provider + 源管理 + 目录 + HTTP
-│  ├─ provider.mjs         # 内置红果：home/search/detail/stream（服务端分块解密）
+│  ├─ provider.mjs         # 内置红果：home/search/detail/stream（官网明文直传 / App 通道分块解密）
 │  ├─ vendor/hongguo.cjs   # 红果解析核心（drpys 派生，GPL，见 LICENSE*）
 │  ├─ catalog.mjs          # 统一目录层：把内置源与 JS 源归一成同一套 API
 │  ├─ media.mjs            # /api/media 透传（支持 Range）、/api/hls 清单重写
@@ -295,8 +295,8 @@ var spider = {
 - **内置红果搜索**：官方搜索接口已被风控，降级为首页推荐池检索（`fallback: true`，结果不全）。需要完整搜索请用 JS 源。
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
-- **红果内置流是 HEVC 1080×1920**：需要浏览器支持 HEVC/H.265 解码（Edge、Chrome 在支持硬解的机器上正常，实测 Edge 可直接播放）；缺 HEVC 支持的环境会黑屏或报解码错误，可改用 JS 源。
-- **红果取址协议会变动**：内置源已适配 2026-11 的 `video_tab` 取址 + 每次新注册设备身份；若上游再次变更，连续 3 次取流失败会熔断 45 秒并在播放器显示「重试 / 换数据源」，无需重启容器。
+- **红果内置流当前是 H.264 360×640（明文 MP4）**：2026-11-11 起字节 App 侧取址接口（`video_tab` / `multi_video_model`）返回 HTTP 200 空正文，内置源改为优先走官网网页播放器通道，浏览器解码无门槛（不需要 HEVC），但清晰度是官网的 360p。App 通道恢复后代码会自动回落到它，届时可拿到更高清晰度。
+- **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路；若两条都失败，连续 3 次取流失败会熔断 45 秒并在播放器显示「重试 / 换数据源」，无需重启容器。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
 - **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。
