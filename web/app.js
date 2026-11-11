@@ -524,11 +524,16 @@
 
   function renderItems(items, append) {
     var grid = $('grid');
+    // 新一次列表渲染（不是翻页追加）代表换了视图，自动补页计数归零
+    if (!append) autoChain = 0;
     if (!append) grid.textContent = '';
     items.forEach(function (it) { grid.appendChild(makeCard(it)); });
     $('empty').classList.toggle('hidden', grid.children.length > 0);
     if (!grid.children.length) $('empty').textContent = '没有内容';
     $('btnMore').classList.toggle('hidden', !state.hasMore);
+    // 结果不足一屏时不会产生滚动，IntersectionObserver 也不会再次触发，
+    // 这里主动补一次「是否已到底」的判定，让后续分页能继续加载。
+    if (state.hasMore && items.length) setTimeout(function () { maybeAutoMore(); }, 700);
   }
 
   function renderChips() {
@@ -701,18 +706,27 @@
   // 划到底部自动加载下一页；分页按钮仍保留作为兜底
   var AUTO_MODES = { home: 1, category: 1, search: 1, recommend: 1 };
   var autoLockAt = 0;
+  // 结果不足一屏时会连续自动补页；给个上限，避免源忽略 page 参数时无限自增。
+  var autoChain = 0;
   function maybeAutoMore() {
     if (!AUTO_MODES[state.mode] || !state.hasMore || state.loadingMore) return;
     if (!$('detail').classList.contains('hidden')) return;
-    if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 600) return;
+    // 结果少时页面撑不满一屏（没有滚动条），此时也算「到底」，否则第二页永远加载不出来
+    var doc = document.documentElement;
+    var fits = doc.scrollHeight <= window.innerHeight + 200;
+    if (!fits && window.innerHeight + window.scrollY < doc.scrollHeight - 600) return;
     if (Date.now() - autoLockAt < 600) return;
+    if (autoChain >= 5) return;
     autoLockAt = Date.now();
+    autoChain += 1;
     loadMore();
   }
 
   function searchNote(r) {
     if (!r || !r.fallback) return '';
-    return '提示：内置红果的官方搜索接口已被风控，这里是在首页推荐池（' + (r.poolSize || 0) + ' 部）中检索的结果，可能不全。切换到 JS 源可获得完整搜索。';
+    // 只有在官网 JSON 搜索真的不可用时才会走到推荐池兜底，把原因带上便于排查
+    return '提示：红果官网搜索暂时不可用' + (r.error ? '（' + r.error + '）' : '') +
+      '，这里是在首页推荐池（' + (r.poolSize || 0) + ' 部）中检索的结果，可能不全。切换到 JS 源可获得完整搜索。';
   }
 
   // ---- 多源聚合搜索：并发请求各源，谁先返回先展示，慢源不阻塞整体 ----
@@ -1572,7 +1586,8 @@
   $('btnHome').addEventListener('click', function () { loadHome(); });
   $('btnRecommend').addEventListener('click', function () { loadRecommend(); });
   $('btnForYou').addEventListener('click', function () { loadForYou(); });
-  window.addEventListener('scroll', maybeAutoMore, { passive: true });
+  // 用户真的滚动时重置自动补页计数，保证长列表能一直往下翻
+  window.addEventListener('scroll', function () { autoChain = 0; maybeAutoMore(); }, { passive: true });
   // 底部哨兵：若滚动事件在容器/内嵌场景不触发，IntersectionObserver 仍能兜住自动加载
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(function (entries) {

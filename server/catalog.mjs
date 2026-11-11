@@ -147,12 +147,14 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// 内置红果的官方搜索接口已被风控（返回空 body），退化为「首页推荐池本地检索」。
+// 内置红果搜索：官网 JSON 搜索接口（/api/search/result）为主通道，
+// 只有它真的不可用时才退化为「首页推荐池本地检索」（结果不全，会带 fallback 标记给前端提示）。
 function createBuiltinSearch(provider) {
   const POOL_PAGES = 8;
   const BATCH = 4;
   const CACHE_MS = 30 * 60 * 1000;
   const PER_PAGE = 24;
+  const WEB_TIMEOUT = 15000;
   let cache = { time: 0, items: [] };
   let refreshing = null;
 
@@ -183,10 +185,37 @@ function createBuiltinSearch(provider) {
     return refreshing;
   }
 
+  // 官网 JSON 搜索：命中即返回，失败才退化到推荐池，最后才抛错。
   async function builtinSearch(keyword, page) {
-    // 有旧结果时先用旧结果秒回，同时后台刷新（stale-while-revalidate），避免每次过期都卡住搜索。
+    let webError = null;
+    try {
+      const result = await withTimeout(
+        provider.search(String(keyword), page),
+        WEB_TIMEOUT,
+        "内置源检索超时",
+      );
+      const items = toItems(result.items);
+      return {
+        source: "hongguo",
+        items,
+        page: Number(result.page) || page,
+        hasMore: Boolean(result.hasMore),
+        total: Number(result.total) || 0,
+        channel: result.channel || "web",
+      };
+    } catch (error) {
+      webError = error;
+    }
+
+    // 官网搜索不可用：退回推荐池本地过滤（stale-while-revalidate，避免每次都卡住）。
     if (!cache.items.length) await refresh();
     else if (Date.now() - cache.time > CACHE_MS) refresh().catch(() => {});
+    if (!cache.items.length) {
+      throw fail(
+        "UPSTREAM_ERROR",
+        "红果搜索暂不可用：" + String((webError && webError.message) || "上游无响应"),
+      );
+    }
     const kw = String(keyword).toLowerCase();
     const hits = cache.items.filter((item) =>
       String(item.title).toLowerCase().includes(kw) ||
@@ -201,6 +230,8 @@ function createBuiltinSearch(provider) {
       hasMore: start + PER_PAGE < hits.length,
       poolSize: cache.items.length,
       fallback: true,
+      channel: "pool",
+      error: String((webError && webError.message) || ""),
     };
   }
   builtinSearch.warmup = () => refresh().catch(() => {});

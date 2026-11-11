@@ -97,6 +97,7 @@ const pageCache = new Map();
 const streamCache = new Map();
 const videoInfoCache = new Map();
 const appSearchCache = new Map();
+const webSearchCache = new Map();
 
 function str(value, fallback = '') { return String(value == null ? fallback : value).trim(); }
 function pageNumber(value) { const n = Number.parseInt(value, 10); return Number.isFinite(n) && n > 0 ? n : 1; }
@@ -432,6 +433,47 @@ async function appSearchPage(keyword, tabType, page = 1, limit = 20) {
         cursor: { search_id: str(tab.search_id), passback: str(tab.passback), next_offset: str(tab.next_offset) },
     };
     appSearchCache.set(cacheKey, { time: Date.now(), value }); return value;
+}
+
+// ---------- 官网 JSON 搜索（搜索页 CSR 化后唯一不依赖签名的通道） ----------
+// 2026-11 起官网把 /search/<kw> 的 SSR 负载换成了 sdk-glue 反爬壳（页面里已没有 _ROUTER_DATA），
+// 而搜索页自己的 CSR 数据源 GET /api/search/result?query= 仍然开放：
+//   - 参数名必须是 query（用 keyword/q 会被当成空查询，返回 400 invalid_query）
+//   - 只校验 User-Agent（无 UA 直接 403 search_rejected），不校验签名/cookie
+//   - 每页固定 10 条，翻页参数是 page，关键词上限 30 字
+const WEB_SEARCH_API = `${SITE}/api/search/result`;
+const WEB_SEARCH_TTL = 120000;
+const WEB_SEARCH_MAX_KEYWORD = 30;
+
+async function websiteSearch(keyword, page = 1) {
+    // 官网只接受 <=30 字的关键词（超长直接 400 too_long）；超长时按前 30 字检索，
+    // 既不让整条搜索链路失败，也不悄悄改变调用方看到的结果条数。
+    const raw = str(keyword);
+    const word = [...raw].slice(0, WEB_SEARCH_MAX_KEYWORD).join('');
+    const pageNo = pageNumber(page);
+    if (!word) return { list: [], hasMore: false, total: 0, page: pageNo, channel: 'web' };
+    const cacheKey = `${word}|${pageNo}`;
+    const cached = webSearchCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < WEB_SEARCH_TTL) return cached.value;
+    const params = new URLSearchParams({ query: word });
+    if (pageNo > 1) params.set('page', String(pageNo));
+    // 官网搜索只认浏览器 UA：App UA 也能过，但无 UA 一律 403，这里固定用榜单同款浏览器 UA
+    const resp = await axios(`${WEB_SEARCH_API}?${params}`, {
+        headers: { 'User-Agent': RANK_UA, 'Accept': 'application/json, text/plain, */*', 'Referer': `${SITE}/search/${encodeURIComponent(word)}` },
+        timeout: 15000, responseType: 'text', validateStatus: () => true,
+    });
+    const body = jsonBody(resp.data);
+    if (resp.status === 403) throw new Error('官网搜索被风控（403）');
+    if (resp.status === 400) throw new Error(`官网搜索拒绝该关键词（${str(body?.validation_reason) || 'bad_query'}）`);
+    if (resp.status !== 200 || !body || !Array.isArray(body.searchList)) throw new Error(`官网搜索 HTTP ${resp.status}`);
+    // 200 + searchList 是权威结果：即使为空也代表「确实没有这部剧」，不再回落到别的通道
+    const list = body.searchList.map(itemToCard).filter((item) => item.url && item.title);
+    const value = {
+        list, hasMore: Boolean(body.hasMore), total: Number(body.totalCount) || 0,
+        page: Number(body.pageNum) || pageNo, totalPages: Number(body.totalPages) || 0, channel: 'web',
+    };
+    webSearchCache.set(cacheKey, { time: Date.now(), value });
+    return value;
 }
 
 // ---------- 字节系签名算法（实测黑盒，勿改常量/位序） ----------
@@ -1169,11 +1211,18 @@ var rule = {
         const page = pageNumber(pg);
         const word = str(key);
         if (!word) return setResult([]);
+        // 首选官网 JSON 搜索（CSR 数据源，只校验 UA，不受 App 签名风控与 SSR 反爬壳影响）
+        try {
+            const web = await websiteSearch(word, page);
+            return setResult(web.list);
+        } catch (e) {
+            log('红果果官网JSON搜索失败回退App: ' + e.message);
+        }
         try {
             const app = await appSearchPage(word, 11, page, 20);
             if (app.list.length) return setResult(app.list);
         } catch (e) {
-            log('红果果App搜索失败回退官网: ' + e.message);
+            log('红果果App搜索失败回退官网SSR: ' + e.message);
         }
         try {
             const data = await routerData(`${SITE}/search/${encodeURIComponent(word)}?page=${page}`);

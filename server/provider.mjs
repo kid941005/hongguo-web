@@ -29,7 +29,7 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, websiteSearch, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats};",
   context,
   { timeout: 5000 }
 );
@@ -157,21 +157,45 @@ export const provider = {
     const items = cards(Array.isArray(rows) ? rows : []);
     return { items, page, hasMore: items.length >= 20 };
   },
+  // 官网 /api/search/result 是搜索页自身的 CSR 数据源：只校验 UA，既不走 App 签名，
+  // 也不依赖 SSR（搜索页已被 sdk-glue 反爬壳换成 CSR）。App 签名接口与 SSR 解析降为兜底。
   async search(keyword, page = 1) {
+    let webError = null;
+    try {
+      const result = await api.websiteSearch(keyword, page);
+      // 200 + searchList 是权威结果（空列表=确实没有），直接返回，不再让别的通道给出不一致答案
+      return {
+        items: cards(result.list),
+        page: result.page || page,
+        hasMore: Boolean(result.hasMore),
+        total: result.total || 0,
+        channel: "web",
+      };
+    } catch (error) {
+      webError = error;
+    }
     try {
       const result = await api.appSearchPage(keyword, 11, page, 20);
-      if (result.list.length) return { items: cards(result.list), page };
+      if (result.list.length)
+        return { items: cards(result.list), page, channel: "app" };
     } catch {
-      /* Website fallback; failure below remains an error, never an empty success. */
+      /* App 签名接口被风控时继续走 SSR 兜底 */
     }
-    const data = await api.routerData(
-      `${SITE}/search/${encodeURIComponent(keyword)}?page=${page}`
+    try {
+      const data = await api.routerData(
+        `${SITE}/search/${encodeURIComponent(keyword)}?page=${page}`
+      );
+      const pageData =
+        data?.loaderData?.["search_(keyword)/page"] ||
+        data?.loaderData?.search_page;
+      if (Array.isArray(pageData?.searchList))
+        return { items: cards(pageData.searchList.map(api.itemToCard)), page, channel: "ssr" };
+    } catch {
+      /* 搜索页已 CSR 化，SSR 兜底通常不可用 */
+    }
+    throw new Error(
+      `红果搜索暂不可用：${(webError && webError.message) || "所有通道均失败"}`
     );
-    const pageData =
-      data?.loaderData?.["search_(keyword)/page"] ||
-      data?.loaderData?.search_page;
-    if (!Array.isArray(pageData?.searchList)) throw new Error("搜索数据不可用");
-    return { items: cards(pageData.searchList.map(api.itemToCard)), page };
   },
   async detail(id) {
     const data = await api.routerData(`${SITE}/detail?series_id=${id}`);

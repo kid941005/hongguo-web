@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.8.2","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.8.3","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑六项冒烟（health / 源列表 / 首页 / 猜你喜欢 / 源自检取流 / 播放监控）。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.8.2
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.8.3
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -152,8 +152,13 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
 - **猜你喜欢**：顶栏「✨ 猜你喜欢」，基于观看历史做推荐，三路信号合并排序（①协同过滤：看过同一部剧的其他用户还看了什么；②相似题材：与你看过的剧标题相近的在架内容；③热门兜底）。结果按稳定键排序并缓存 2 分钟，**同一账号在任何设备上看到相同结果**；不同账号互相隔离。未登录时用本机历史作为种子（只看本机数据，不上传）；没有任何历史时先给热门榜单。卡片左上角徽标标明「同好也在看 / 相似内容 / 热门」，顶部提示条说明本次依据。
 - **无限滚动**：首页、分类、搜索结果和推荐页滑到底部会自动加载下一页；「加载更多」按钮仍保留作为兜底（自动加载不可用时手动点）。
-- **搜索**：输入关键词回车。红果内置源的官方搜索接口被风控，会自动降级为「首页推荐池检索」（结果偏少，界面会提示）；JS 源走各自搜索接口，完整可用。
+- **搜索**：输入关键词回车。红果内置源走官网 JSON 搜索（`/api/search/result`），每页 10 条、支持翻页，返回真实结果集；只有该通道真的不可用时才降级为「首页推荐池检索」（结果偏少，界面会提示原因）。JS 源走各自搜索接口。关键词超过 30 字时按前 30 字检索（官网硬限制）。
 - **播放**：点卡片 → 详情页选集。多线路时先选线路。播放器支持 HLS（m3u8，含多码率清晰度切换）与 MP4 直链；FLV 没有对应播放器，源里返回 flv 会播不了。
+- **红果搜索通道**（服务端三级降级，日志会记录走了哪条）：
+  1. `websiteSearch` → `GET https://hongguoduanju.com/api/search/result?query=<关键词>&page=N`（官网搜索页的 CSR 数据源，只需浏览器 UA；每页 10 条，`page` 翻页，关键词上限 30 字）；
+  2. `appSearchPage` → 番茄 App 签名接口（历史通道，长期处于风控中，仅作兜底）；
+  3. `routerData` → 官网搜索页 SSR 解析（搜索页已改成 sdk-glue 反爬壳 + CSR，通常没有 `_ROUTER_DATA`）；
+  4. 三条都失败才退到「首页推荐池本地检索」，并在响应里标 `fallback: true`。
 - **播放失败自动找替代源**：播放报错时播放器错误条会多出一个按钮「换到「<源>」看第 N 集」——后端拿当前剧名到其它源搜索、按标题相似度（≥0.62）匹配并校验集数覆盖，取最像的前 3 个候选；点一下即切到那个源的同名剧、并直接定位到同一集继续看。找不到同名剧时按钮不出现（红果独播剧在别家通常没有）。
 - **播放通道监控**：服务端每 10 分钟真实取一集首块（校验 `ftyp`）探测内置红果通道，连续 3 次失败判定不可用；状态翻转时写日志（`event:"playback_alert"`）并按需推 Webhook，网页顶部出现红色横幅提示「通道不可用 / 已回落到备用通道」。状态也可随时查 `GET /api/alerts`。
 - **账号（可选）**：顶栏「账号 ▾」菜单里「登录 / 注册」注册登录（登录后显示用户名与「退出」；用户名 3–20 位中英文数字下划线，密码 6–64 位）。账号只用来同步下面的个人数据，不登录也能正常看剧。
@@ -305,7 +310,7 @@ var spider = {
 
 ## 7. 已知限制
 
-- **内置红果搜索**：官方搜索接口已被风控，降级为首页推荐池检索（`fallback: true`，结果不全）。需要完整搜索请用 JS 源。
+- **内置红果搜索**：主通道是官网搜索页自己用的 JSON 接口 `GET /api/search/result?query=`（只校验 UA，不依赖 App 签名，也不依赖已 CSR 化的搜索页 SSR），响应里带 `channel: "web"`、`total`、`hasMore`。该通道失败时才降级为首页推荐池检索（`fallback: true`、`channel: "pool"`，结果不全）。
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
 - **红果内置流当前是 H.264 360×640（明文 MP4）**：2026-11-11 起字节 App 侧取址接口（`video_tab` / `multi_video_model`）返回 HTTP 200 空正文，内置源改为优先走官网网页播放器通道，浏览器解码无门槛（不需要 HEVC），但清晰度是官网的 360p。App 通道恢复后代码会自动回落到它，届时可拿到更高清晰度。
