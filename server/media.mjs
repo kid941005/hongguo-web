@@ -73,6 +73,24 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
 
 // HLS 清单重写：把分片与子清单全部改成本站代理地址。
 // token 用于在开了访问口令时把鉴权参数带到后续分片请求（浏览器媒体请求无法带 Authorization 头）。
+//
+// 判定子清单不能只看 URL 里有没有 "m3u8"：EXT-X-KEY 的 URI 是密钥、EXT-X-MAP 的 URI 是 init 段，
+// 即使地址里带 m3u8 字样也必须当媒体代理。这里按标签语义分三类：
+//   manifest —— EXT-X-STREAM-INF 的下一行，一定是子清单
+//   media    —— 密钥 / init 段 / fMP4 part / preload hint，一定是二进制
+//   auto     —— 其它（EXT-X-MEDIA、I-FRAME-STREAM-INF 等），按路径后缀判断
+const MEDIA_URI_TAGS = /^#EXT-X-(?:KEY|SESSION-KEY|MAP|PART|PRELOAD-HINT):/i;
+
+function classifyManifest(abs, hint) {
+  if (hint === "manifest") return true;
+  if (hint === "media") return false;
+  try {
+    return /\.m3u8?$/i.test(new URL(abs).pathname);
+  } catch {
+    return false;
+  }
+}
+
 export async function proxyHls(req, res, { url, referer, token, ua }) {
   const userAgent = cleanUa(ua);
   let upstream;
@@ -94,32 +112,41 @@ export async function proxyHls(req, res, { url, referer, token, ua }) {
 
   const base = upstream.url || url;
   const text = await upstream.text();
+  // 上游把错误页（HTML/JSON）当清单返回时直接报错，别重写后喂给播放器。
+  if (!/^\uFEFF?\s*#EXTM3U/.test(text)) {
+    throw fail("UPSTREAM", "上游返回的不是 HLS 清单");
+  }
+
   const suffix =
     (referer ? "&r=" + encodeURIComponent(referer) : "") +
     (token ? "&token=" + encodeURIComponent(token) : "") +
     (userAgent ? "&ua=" + encodeURIComponent(userAgent) : "");
-  const rewrite = (raw) => {
+  const rewrite = (raw, hint) => {
     let abs;
     try {
       abs = new URL(raw, base).toString();
     } catch {
       return raw;
     }
-    let isManifest = false;
-    try {
-      const pathname = new URL(abs).pathname;
-      isManifest = /\.m3u8$/i.test(pathname) || /m3u8/i.test(pathname);
-    } catch { /* 解析失败按分片处理 */ }
-    return (isManifest ? "/api/hls?u=" : "/api/media?u=") + encodeURIComponent(abs) + suffix;
+    return (classifyManifest(abs, hint) ? "/api/hls?u=" : "/api/media?u=") + encodeURIComponent(abs) + suffix;
   };
 
+  let expectVariant = false;
   const rewritten = text
-    .split("\n")
+    .split(/\r\n|\n|\r/)
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed) return line;
-      if (trimmed.startsWith("#")) return line.replace(/URI="([^"]*)"/g, (_m, u) => 'URI="' + rewrite(u) + '"');
-      return rewrite(trimmed);
+      if (trimmed.startsWith("#")) {
+        // 变体清单的 URI 在 EXT-X-STREAM-INF 的下一行，这里只做标记。
+        expectVariant = /^#EXT-X-STREAM-INF:/i.test(trimmed);
+        const hint = MEDIA_URI_TAGS.test(trimmed) ? "media" : "auto";
+        if (trimmed.indexOf('URI="') === -1) return line;
+        return line.replace(/URI="([^"]*)"/g, (_m, u) => 'URI="' + rewrite(u, hint) + '"');
+      }
+      const hint = expectVariant ? "manifest" : "auto";
+      expectVariant = false;
+      return rewrite(trimmed, hint);
     })
     .join("\n");
 

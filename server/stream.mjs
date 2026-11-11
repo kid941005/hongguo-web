@@ -30,6 +30,17 @@ export function createStreamHandler({ provider, limit = 6 }) {
   return async function serveStream(req, res, epId) {
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
     if (!/^[1-9]\d{0,29}$/.test(epId)) throw fail("BAD_INPUT", "剧集 id 无效");
+
+    // HEAD 只回元数据：不去解析播放地址（要打上游取址接口）、不占用播放槽位。
+    // 旧实现 HEAD 也会跑一遍 provider.stream，等于探活就触发一次上游风控。
+    if (req.method === "HEAD") {
+      res.writeHead(200, {
+        "content-type": "video/mp4",
+        "accept-ranges": "bytes",
+        "cache-control": "no-store",
+      });
+      return res.end();
+    }
     if (active >= limit) throw fail("BUSY", "同时播放数已达上限（" + limit + "），请稍后重试");
 
     active++;
@@ -50,11 +61,8 @@ export function createStreamHandler({ provider, limit = 6 }) {
       if (req.headers.range) headers["content-range"] = "bytes " + start + "-" + end + "/" + stream.total;
 
       // 先取首块：解密失败时还能回错误码，而不是发出半截响应
-      const first = req.method === "HEAD"
-        ? null
-        : await withTimeout(stream.chunk(start, Math.min(start + CHUNK - 1, end)), 20000, "视频分块读取超时");
+      const first = await withTimeout(stream.chunk(start, Math.min(start + CHUNK - 1, end)), 20000, "视频分块读取超时");
       res.writeHead(req.headers.range ? 206 : 200, headers);
-      if (req.method === "HEAD") return res.end();
 
       for (let offset = start; offset <= end && !res.destroyed; offset += CHUNK) {
         const chunk = offset === start

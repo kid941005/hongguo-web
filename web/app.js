@@ -549,15 +549,13 @@
   function loadMore() {
     if (state.loadingMore || !state.hasMore) return Promise.resolve();
     state.loadingMore = true;
+    if (state.mode === 'search' && state.aggregate) {
+      // 聚合搜索按源各自翻页，失败源不推进页码，下次滚动自动重试同一页。
+      setAutoMore(true);
+      return aggFetchPage(true);
+    }
     state.page += 1;
     var p = state.page;
-    if (state.mode === 'search' && state.aggregate) {
-      setAutoMore(true);
-      return aggFetchPage(p, true).then(function (result) {
-        // 所有源这一页都失败时回退页码，避免下次滚动跳过一页。
-        if (result && result.attempted > 0 && result.failed === result.attempted) state.page -= 1;
-      });
-    }
     var req;
     if (state.mode === 'recommend') req = api('/api/recommend', { page: p });
     else if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p });
@@ -642,12 +640,13 @@
     return txt;
   }
 
-  function startAggSearch(q, append, page) {
+  function startAggSearch(q, append) {
     var list = aggSources();
     state.aggregate = true;
     if (!append) {
+      // 每个源维护自己的页码：慢源/失败源不会因为别家翻页而跳页。
       state.aggGroups = list.map(function (s) {
-        return { id: s.id, name: s.name || s.id, page: 0, hasMore: false, count: 0, error: '', loading: true, items: [] };
+        return { id: s.id, name: s.name || s.id, page: 0, hasMore: true, count: 0, error: '', loading: true, items: [] };
       });
       state.hasMore = false;
     }
@@ -656,10 +655,11 @@
       $('empty').textContent = '没有可用于聚合搜索的源'; $('empty').classList.remove('hidden');
       return Promise.resolve();
     }
-    return aggFetchPage(page || 1, !!append);
+    return aggFetchPage(!!append);
   }
 
-  function aggFetchPage(page, append) {
+  // 聚合搜索翻页：按每个源自己的 page+1 请求，互不牵连。
+  function aggFetchPage(append) {
     var groups = state.aggGroups || [];
     var attempted = 0;
     var failed = 0;
@@ -667,13 +667,16 @@
     showNotice(aggNote());
     var jobs = groups.map(function (g) {
       if (append && !g.hasMore) { g.loading = false; return Promise.resolve(); }
+      var next = (g.page || 0) + 1;
       attempted += 1;
-      return api('/api/search', { source: g.id, q: state.q, page: page }).then(function (r) {
+      return api('/api/search', { source: g.id, q: state.q, page: next }).then(function (r) {
         var incoming = (r.items || []).map(function (it) {
           return Object.assign({}, it, { source: g.id, sourceName: g.name });
         });
-        g.loading = false; g.error = ''; g.page = page;
-        g.hasMore = !!r.hasMore; g.fallback = !!r.fallback;
+        g.loading = false; g.error = ''; g.page = next;
+        // 空列表却仍报 hasMore 的源强制收尾，避免无限翻页。
+        g.hasMore = incoming.length ? !!r.hasMore : false;
+        g.fallback = !!r.fallback;
         g.count += incoming.length;
         g.items = (g.items || []).concat(incoming);
         if (incoming.length) {
@@ -683,12 +686,14 @@
       }).catch(function (e) {
         g.loading = false;
         failed += 1;
+        // 失败不推进 g.page，下次滚动仍从同一页重试。
         if (!append) { g.error = e && e.message ? e.message : '请求失败'; }
       }).then(function () {
         showNotice(aggNote());
       });
     });
     return Promise.all(jobs).then(function () {
+      state.page = groups.reduce(function (n, g) { return Math.max(n, g.page || 0); }, 0);
       state.hasMore = groups.some(function (g) { return g.hasMore; });
       $('btnMore').classList.toggle('hidden', !state.hasMore);
       if (!$('grid').children.length) {
@@ -706,7 +711,7 @@
     setView('home'); setNav(''); state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
     $('chips').textContent = ''; state.items = []; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
     $('empty').textContent = '搜索中…'; $('empty').classList.remove('hidden'); showNotice('');
-    if (cur() === '__all') { startAggSearch(q, false, 1); return; }
+    if (cur() === '__all') { startAggSearch(q, false); return; }
     state.aggregate = false; state.aggGroups = [];
     api('/api/search', { source: cur(), q: q, page: 1 }).then(function (r) {
       state.hasMore = !!r.hasMore;
