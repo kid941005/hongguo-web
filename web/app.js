@@ -9,7 +9,7 @@
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [],
-    loadingMore: false, autoNextLatch: false,
+    loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     user: null, favs: [], follows: []
   };
 
@@ -498,6 +498,7 @@
 
   function loadHome() {
     setView('home'); setNav('home'); showNotice('');
+    state.aggregate = false; state.aggGroups = [];
     if (state.source === '__all') {
       $('grid').textContent = ''; $('chips').textContent = ''; $('btnMore').classList.add('hidden');
       state.classes = []; state.items = []; state.hasMore = false; state.mode = 'home';
@@ -523,7 +524,7 @@
   }
 
   function loadCategory(tid) {
-    setView('home'); setNav(''); state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
+    setView('home'); setNav(''); state.aggregate = false; state.aggGroups = []; state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
     renderChips();
     $('empty').textContent = '加载中…'; $('empty').classList.remove('hidden'); $('grid').textContent = '';
     return api('/api/category', { source: cur(), tid: tid, page: 1 }).then(function (r) {
@@ -538,6 +539,10 @@
     state.loadingMore = true;
     state.page += 1;
     var p = state.page;
+    if (state.mode === 'search' && state.aggregate) {
+      setAutoMore(true);
+      return aggFetchPage(p, true);
+    }
     var req;
     if (state.mode === 'recommend') req = api('/api/recommend', { page: p });
     else if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p });
@@ -551,7 +556,7 @@
       // 有的源会返回空列表却仍报 hasMore=true，这里强制收尾，避免无限加载。
       state.hasMore = incoming.length ? !!r.hasMore : false;
       renderItems(incoming, true);
-      if (state.mode === 'search') { if (r.aggregate) showNotice(aggNote(r)); else if (r.fallback) showNotice(searchNote(r)); }
+      if (state.mode === 'search' && r.fallback) showNotice(searchNote(r));
       done();
     }).catch(function (e) { state.page -= 1; done(); showError(e); });
   }
@@ -559,6 +564,7 @@
   // ---- 推荐页（红果各榜单按真实评分合并排序） ----
   function loadRecommend() {
     setView('home'); setNav('recommend'); showNotice('');
+    state.aggregate = false; state.aggGroups = [];
     state.mode = 'recommend'; state.tid = ''; state.q = ''; state.page = 1; state.classes = [];
     $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
     $('empty').textContent = '加载推荐中…'; $('empty').classList.remove('hidden');
@@ -599,26 +605,93 @@
     return '提示：内置红果的官方搜索接口已被风控，这里是在首页推荐池（' + (r.poolSize || 0) + ' 部）中检索的结果，可能不全。切换到 JS 源可获得完整搜索。';
   }
 
-  function aggNote(r) {
-    var gs = r.groups || [];
-    var ok = gs.filter(function (g) { return g.count > 0; });
+  // ---- 多源聚合搜索：并发请求各源，谁先返回先展示，慢源不阻塞整体 ----
+  // 模板/示例源固定排除，避免把「示例剧」和 example.com 的 404 噪音带进聚合结果。
+  var AGG_SKIP = { template: 1, maccms: 1 };
+  function aggSources() {
+    return (state.sources || []).filter(function (s) { return s && s.id && !AGG_SKIP[s.id]; });
+  }
+
+  function aggNote() {
+    var gs = state.aggGroups || [];
+    if (!gs.length) return '聚合搜索：没有可用的源';
+    var loaded = gs.filter(function (g) { return !g.loading; }).length;
+    var total = gs.reduce(function (n, g) { return n + (g.count || 0); }, 0);
+    var parts = gs.filter(function (g) { return g.count > 0; })
+      .map(function (g) { return g.name + ' ' + g.count + ' 条' + (g.fallback ? '（推荐池）' : ''); });
     var bad = gs.filter(function (g) { return g.error; });
-    var parts = ok.map(function (g) { return g.name + ' ' + g.count + ' 条'; });
-    var txt = '聚合搜索：共 ' + (r.items || []).length + ' 条' + (parts.length ? '（' + parts.join('，') + '）' : '（没有源命中）');
+    var txt = '聚合搜索：已返回 ' + loaded + '/' + gs.length + ' 个源，共 ' + total + ' 条';
+    if (parts.length) txt += '（' + parts.join('，') + '）';
     if (bad.length) txt += '；失败：' + bad.map(function (g) { return g.name + '（' + g.error + '）'; }).join('，');
+    if (loaded < gs.length) txt += ' · 加载中…';
     return txt;
+  }
+
+  function startAggSearch(q, append, page) {
+    var list = aggSources();
+    state.aggregate = true;
+    if (!append) {
+      state.aggGroups = list.map(function (s) {
+        return { id: s.id, name: s.name || s.id, page: 0, hasMore: false, count: 0, error: '', loading: true, items: [] };
+      });
+      state.hasMore = false;
+    }
+    if (!list.length) {
+      state.aggregate = false;
+      $('empty').textContent = '没有可用于聚合搜索的源'; $('empty').classList.remove('hidden');
+      return Promise.resolve();
+    }
+    return aggFetchPage(page || 1, !!append);
+  }
+
+  function aggFetchPage(page, append) {
+    var groups = state.aggGroups || [];
+    groups.forEach(function (g) { if (!append || g.hasMore) { g.loading = true; if (!append) g.error = ''; } });
+    showNotice(aggNote());
+    var jobs = groups.map(function (g) {
+      if (append && !g.hasMore) { g.loading = false; return Promise.resolve(); }
+      return api('/api/search', { source: g.id, q: state.q, page: page }).then(function (r) {
+        var incoming = (r.items || []).map(function (it) {
+          return Object.assign({}, it, { source: g.id, sourceName: g.name });
+        });
+        g.loading = false; g.error = ''; g.page = page;
+        g.hasMore = !!r.hasMore; g.fallback = !!r.fallback;
+        g.count += incoming.length;
+        g.items = (g.items || []).concat(incoming);
+        if (incoming.length) {
+          renderItems(incoming, true);
+          $('empty').classList.add('hidden');
+        }
+      }).catch(function (e) {
+        g.loading = false;
+        if (!append) { g.error = e && e.message ? e.message : '请求失败'; }
+      }).then(function () {
+        showNotice(aggNote());
+      });
+    });
+    return Promise.all(jobs).then(function () {
+      state.hasMore = groups.some(function (g) { return g.hasMore; });
+      $('btnMore').classList.toggle('hidden', !state.hasMore);
+      if (!$('grid').children.length) {
+        $('empty').textContent = '没有找到「' + state.q + '」'; $('empty').classList.remove('hidden');
+      }
+      state.loadingMore = false;
+      setAutoMore(false);
+    });
   }
 
   function doSearch() {
     var q = $('q').value.trim();
     if (!q) { loadHome(); return; }
     setView('home'); setNav(''); state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
-    $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
+    $('chips').textContent = ''; state.items = []; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
     $('empty').textContent = '搜索中…'; $('empty').classList.remove('hidden'); showNotice('');
+    if (cur() === '__all') { startAggSearch(q, false, 1); return; }
+    state.aggregate = false; state.aggGroups = [];
     api('/api/search', { source: cur(), q: q, page: 1 }).then(function (r) {
       state.hasMore = !!r.hasMore;
       renderItems(r.items || [], false);
-      showNotice(r.aggregate ? aggNote(r) : searchNote(r));
+      showNotice(searchNote(r));
       if (!(r.items || []).length) { $('empty').textContent = '没有找到「' + q + '」'; $('empty').classList.remove('hidden'); }
     }).catch(function (e) { showError(e); });
   }

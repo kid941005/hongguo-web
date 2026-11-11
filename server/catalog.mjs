@@ -5,6 +5,9 @@ import { fail } from "./errors.mjs";
 
 const TIMEOUT_HOME = 40000;
 const TIMEOUT_SEARCH = 60000;
+const TIMEOUT_AGGREGATE = 12000; // 聚合搜索单源上限：慢源不拖住整体
+// 模板/示例源不参与聚合，避免「示例剧」和 example.com 404 污染结果。
+const AGGREGATE_SKIP = new Set(["template", "maccms"]);
 const RECOMMEND_PER_PAGE = 24;
 
 function pick(...values) {
@@ -362,12 +365,12 @@ export function createCatalog({ provider, sources }) {
   async function searchAll(keyword, page = 1) {
     const pageNo = Number(page) || 1;
     const groups = await Promise.all(
-      sources.list().sources.map(async (source) => {
+      sources.list().sources.filter((source) => !AGGREGATE_SKIP.has(source.id)).map(async (source) => {
         const started = Date.now();
         try {
           const result = source.type === "builtin"
             ? await withTimeout(builtinSearch(keyword, pageNo), 30000, "内置源检索超时")
-            : await search(source.id, keyword, pageNo);
+            : await withTimeout(search(source.id, keyword, pageNo), TIMEOUT_AGGREGATE, "聚合检索超时");
           return {
             source: source.id,
             name: source.name,

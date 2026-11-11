@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.5.6","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.6.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.5.6
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.6.0
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -141,7 +141,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 ## 3. 使用
 
 - **切换源**：顶栏「源」下拉框；内置红果 + 随包附带的七猫/西饭/星芽/牛牛等 JS 源。
-- **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会并发查询所有源并按源交错合并，卡片左上角带源名徽标；点开卡片时自动带上它所属的源。顶部提示条会列出每个源命中多少条、哪些源失败。
+- **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会**并发查询所有可用源、谁先返回先展示**（慢源不阻塞），卡片左上角带源名徽标，点开卡片自动带上所属源。顶部提示条实时显示「已返回 X/Y 个源、共 N 条」及各源命中数/失败原因；模板与示例源不参与聚合。
 - **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。有上游地址的源会显示「自动更新」开关，面板底部「检查源更新」可立即检查全部源；更新失败只记录错误并保留旧版本。
 - **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。按 URL 导入的源会记住地址并默认自动更新（仅 HTTPS）；直接粘贴源码的源若 meta 里带 `updateUrl` 也会自动更新。
 - **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
@@ -297,7 +297,7 @@ var spider = {
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
 - **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
-- **聚合搜索耗时**：受最慢的源制约（单源超时：搜索 60s、首页/分类/详情 40s、聚合里的内置红果 30s），源多时首屏会慢；已按源交错合并，不会让某个源霸屏。
+- **聚合搜索耗时**：各源并发、先返回先展示，不会等最慢的源；单源聚合上限 12 秒（内置红果 30 秒），超时或失败只丢该源并在提示条注明。模板/示例源（`template`、`maccms`）默认不参与聚合，避免 404 与示例数据噪音。
 - **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。
 - **JS 源沙箱**：每个 JS 源在独立 `worker_threads` 线程内运行，默认 64 MB 内存上限；死循环/超时或内存超限会自动终止该源线程，不影响主服务，下次调用自动重启。单次同步执行超过 5 秒会被中断，防止死循环占满 CPU。可用 `SOURCE_WORKER_MAX_OLD_MB` 等变量调整。
 - **源自动更新**：只对 HTTPS 上游生效；内置红果解密源不在自动更新范围内（它依赖服务端解密模块，需随镜像升级）。更新失败会保留旧版本并记录原因，可在源管理面板查看。
