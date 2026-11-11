@@ -141,6 +141,12 @@
       b.title = logged ? ('已登录：' + state.user.username) : '登录（多设备同步）';
       b.classList.toggle('on', logged);
     }
+    // 顶栏只显示「账号」二字，登录名放进面板与 tooltip 里
+    var mb = $('btnMenuAccount');
+    if (mb) {
+      mb.title = logged ? ('账号：' + state.user.username) : '账号：登录 / 注册';
+      mb.classList.toggle('logged', logged);
+    }
     // 账号分组：未登录显示「登录 / 注册」，已登录显示「用户名 / 退出」。
     var reg = $('btnRegister'); if (reg) reg.classList.toggle('hidden', logged);
     var out = $('btnLogout'); if (out) out.classList.toggle('hidden', !logged);
@@ -307,6 +313,8 @@
     var b = $('followBadge'); if (!b) return;
     if (n > 0) { b.textContent = String(n); b.classList.remove('hidden'); }
     else { b.textContent = ''; b.classList.add('hidden'); }
+    // 「历史」菜单收起时用一个小圆点提示有新集
+    var dot = $('menuHistDot'); if (dot) dot.classList.toggle('hidden', !(n > 0));
   }
   function checkUpdates(force, silent) {
     if (!state.user) return Promise.resolve([]);
@@ -546,6 +554,12 @@
       all.textContent = '🔎 全部源（聚合搜索）';
       if (state.source === '__all') all.selected = true;
       sel.appendChild(all);
+      // 菜单标题只写「源」，当前源名放进 tooltip，避免顶栏过长
+      var mb = $('btnMenuSource');
+      if (mb) {
+        var cur = state.sources.filter(function (s) { return s.id === state.source; })[0];
+        mb.title = '源：' + (state.source === '__all' ? '全部源（聚合搜索）' : (cur ? cur.name : state.source));
+      }
     });
   }
 
@@ -1484,12 +1498,14 @@
     if (id === '__all') {
       state.source = '__all';
       $('sourceSelect').value = '__all';
+      closeMenus();
       loadHome();
       return Promise.resolve();
     }
     return postJson('/api/sources/active', { id: id }).then(function () {
       state.source = id;
       $('sourceSelect').value = id;
+      closeMenus();
       return loadSources().then(loadHome);
     });
   }
@@ -1559,6 +1575,40 @@
   $('video').addEventListener('loadedmetadata', hidePlayerError);
   $('video').addEventListener('playing', hidePlayerError);
   $('btnNext').addEventListener('click', nextEpisode);
+  // ---- 顶栏二级菜单（账号 / 历史 / 源）----
+  // 顶栏只保留三个分组标题，具体功能都在下拉面板里；同时只展开一个。
+  function closeMenus(except) {
+    var nodes = document.querySelectorAll('.tbmenu');
+    for (var i = 0; i < nodes.length; i++) {
+      var m = nodes[i];
+      if (except && m === except) continue;
+      m.classList.remove('open');
+      var p = m.querySelector('.menupanel'); if (p) p.classList.add('hidden');
+      var b = m.querySelector('.menubtn'); if (b) b.setAttribute('aria-expanded', 'false');
+    }
+  }
+  function toggleMenu(menu) {
+    var open = menu.classList.contains('open');
+    closeMenus(menu);
+    menu.classList.toggle('open', !open);
+    var panel = menu.querySelector('.menupanel'); if (panel) panel.classList.toggle('hidden', open);
+    var btn = menu.querySelector('.menubtn'); if (btn) btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  }
+  [['menuAccount', 'btnMenuAccount'], ['menuHistory', 'btnMenuHistory'], ['menuSource', 'btnMenuSource']].forEach(function (pair) {
+    var menu = $(pair[0]), btn = $(pair[1]);
+    if (!menu || !btn) return;
+    btn.addEventListener('click', function (e) { e.stopPropagation(); toggleMenu(menu); });
+    // 点面板里的任意按钮后收起（源下拉框保持展开，方便连续切换）
+    menu.querySelector('.menupanel').addEventListener('click', function (e) {
+      if (e.target && e.target.tagName === 'SELECT') return;
+      if (e.target && e.target.classList && e.target.classList.contains('menuitem')) closeMenus();
+    });
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target && e.target.closest && e.target.closest('.tbmenu')) return;
+    closeMenus();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeMenus(); });
   $('btnImport').addEventListener('click', openImport);
   $('btnManage').addEventListener('click', openManage);
   $('btnManageClose').addEventListener('click', closeManage);
@@ -1615,7 +1665,7 @@
     loadRecommend: loadRecommend, loadForYou: loadForYou, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
     openAuth: openAuth, logout: logout, refreshMe: refreshMe, checkUpdates: checkUpdates,
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
-    mergeServerHistory: mergeServerHistory
+    mergeServerHistory: mergeServerHistory, closeMenus: closeMenus
   };
 
   // ---- 启动 ----

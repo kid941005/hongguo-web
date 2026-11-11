@@ -26,26 +26,35 @@
       <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
       <button id="btnSearch" class="btn">搜索</button>
     </div>
-    <span class="tbgroup tbg-account">
-      <span class="tbglabel">账号</span>
-      <button id="btnAccount" class="btn ghost" title="登录（多设备同步）">👤 登录</button>
-      <button id="btnRegister" class="btn ghost" title="注册新账号">注册</button>
-      <button id="btnLogout" class="btn ghost hidden" title="退出登录">退出</button>
-    </span>
-  </div>
-  <div class="tb-tools">
-    <span class="tbgroup">
-      <span class="tbglabel">源</span>
-      <select id="sourceSelect" class="select" title="目前使用的数据源（点击切换）"></select>
-      <button id="btnImport" class="btn ghost" title="新增糖葫芦风格 JS 源">＋ 新增</button>
-      <button id="btnManage" class="btn ghost" title="管理数据源：启用 / 日志 / 删除">⚙ 管理</button>
-    </span>
-    <span class="tbgroup">
-      <span class="tbglabel">历史</span>
-      <button id="btnHistory" class="btn ghost" title="在看：观看历史与续播">🕘 在看</button>
-      <button id="btnFavs" class="btn ghost" title="我的收藏">☆ 收藏</button>
-      <button id="btnFollows" class="btn ghost" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
-    </span>
+    <div class="tbmenus">
+      <div class="tbmenu" id="menuAccount">
+        <button id="btnMenuAccount" class="menubtn" type="button" aria-haspopup="true" aria-expanded="false">账号<span class="caret">▾</span></button>
+        <div class="menupanel hidden">
+          <button id="btnAccount" class="menuitem" type="button" title="登录（多设备同步）">👤 登录</button>
+          <button id="btnRegister" class="menuitem" type="button" title="注册新账号">注册</button>
+          <button id="btnLogout" class="menuitem hidden" type="button" title="退出登录">退出</button>
+        </div>
+      </div>
+      <div class="tbmenu" id="menuHistory">
+        <button id="btnMenuHistory" class="menubtn" type="button" aria-haspopup="true" aria-expanded="false">历史<span id="menuHistDot" class="dot hidden"></span><span class="caret">▾</span></button>
+        <div class="menupanel hidden">
+          <button id="btnHistory" class="menuitem" type="button" title="在看：观看历史与续播">🕘 在看</button>
+          <button id="btnFavs" class="menuitem" type="button" title="我的收藏">☆ 收藏</button>
+          <button id="btnFollows" class="menuitem" type="button" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
+        </div>
+      </div>
+      <div class="tbmenu" id="menuSource">
+        <button id="btnMenuSource" class="menubtn" type="button" aria-haspopup="true" aria-expanded="false">源<span class="caret">▾</span></button>
+        <div class="menupanel wide hidden">
+          <label class="menulabel" for="sourceSelect">目前数据源</label>
+          <select id="sourceSelect" class="select" title="目前使用的数据源（点击切换）"></select>
+          <div class="menurow">
+            <button id="btnImport" class="menuitem" type="button" title="新增糖葫芦风格 JS 源">＋ 新增</button>
+            <button id="btnManage" class="menuitem" type="button" title="管理数据源：启用 / 日志 / 删除">⚙ 管理</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </header>
 
