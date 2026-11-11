@@ -117,12 +117,16 @@ function withTimeout(promise, ms, message) {
 // 内置红果的官方搜索接口已被风控（返回空 body），退化为「首页推荐池本地检索」。
 function createBuiltinSearch(provider) {
   const POOL_PAGES = 8;
-  const BATCH = 3;
-  const CACHE_MS = 10 * 60 * 1000;
+  const BATCH = 4;
+  const CACHE_MS = 30 * 60 * 1000;
   const PER_PAGE = 24;
   let cache = { time: 0, items: [] };
+  let refreshing = null;
 
-  async function refresh() {
+  function refresh() {
+    // 同一时刻只跑一份刷新，避免多条搜索同时触发重复抓取。
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
     const items = [];
     const seen = new Set();
     for (let start = 1; start <= POOL_PAGES; start += BATCH) {
@@ -140,12 +144,16 @@ function createBuiltinSearch(provider) {
         }
       }
     }
-    if (items.length) cache = { time: Date.now(), items };
-    return cache;
+      if (items.length) cache = { time: Date.now(), items };
+      return cache;
+    })().finally(() => { refreshing = null; });
+    return refreshing;
   }
 
-  return async function builtinSearch(keyword, page) {
-    if (!cache.items.length || Date.now() - cache.time > CACHE_MS) await refresh();
+  async function builtinSearch(keyword, page) {
+    // 有旧结果时先用旧结果秒回，同时后台刷新（stale-while-revalidate），避免每次过期都卡住搜索。
+    if (!cache.items.length) await refresh();
+    else if (Date.now() - cache.time > CACHE_MS) refresh().catch(() => {});
     const kw = String(keyword).toLowerCase();
     const hits = cache.items.filter((item) =>
       String(item.title).toLowerCase().includes(kw) ||
@@ -161,7 +169,9 @@ function createBuiltinSearch(provider) {
       poolSize: cache.items.length,
       fallback: true,
     };
-  };
+  }
+  builtinSearch.warmup = () => refresh().catch(() => {});
+  return builtinSearch;
 }
 
 export function createCatalog({ provider, sources }) {
@@ -416,6 +426,71 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
+  // 启动预热：把内置红果推荐池先抓进缓存，避免用户第一次搜索等 5–10 秒。
+  function warmup() {
+    return builtinSearch.warmup ? builtinSearch.warmup() : Promise.resolve();
+  }
+
+  // 源健康检查：默认只校验首页/详情可达（快）；deep=1 时额外真实取流校验首块是否为 ftyp。
+  async function health(sourceId, options = {}) {
+    const entry = entryOf(sourceId);
+    const deep = Boolean(options && options.deep);
+    const started = Date.now();
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const homeData = await withTimeout(home(entry.id, 1), 15000, "健康检查超时");
+        let playback = null;
+        if (deep && entry.type === "builtin" && homeData.items.length) {
+          const first = homeData.items[0];
+          try {
+            playback = await withTimeout((async () => {
+              const detail = await withTimeout(provider.detail(String(first.id)), 15000, "健康检查详情超时");
+              const episode = detail.episodes && detail.episodes[0];
+              if (!episode) return null;
+              const stream = await withTimeout(provider.stream(String(episode.id), false, false), 20000, "健康检查取流超时");
+              const chunk = await stream.chunk(0, Math.min(15, Math.max(0, stream.total - 1)));
+              const head = Buffer.from(chunk).subarray(4, 8).toString("ascii");
+              return {
+                ok: chunk.length >= 8 && head === "ftyp",
+                bytes: chunk.length,
+                total: stream.total,
+                head,
+              };
+            })(), 15000, "深度自检超时");
+          } catch (error) {
+            playback = { ok: false, error: String((error && error.message) || error) };
+          }
+        }
+        return {
+          source: entry.id,
+          name: entry.name,
+          ok: true,
+          ms: Date.now() - started,
+          items: homeData.items.length,
+          playback,
+          degraded: Boolean(playback && !playback.ok),
+        };
+      } catch (error) {
+        lastError = String((error && error.message) || error);
+        // 首页本身是网络瞬断时重试一次；语义错误不重试。
+        if (attempt === 0 && /ENOTFOUND|EAI_AGAIN|ECONN|socket|TLS|disconnected|timeout|超时/i.test(lastError)) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          continue;
+        }
+        break;
+      }
+    }
+    return {
+      source: entry.id,
+      name: entry.name,
+      ok: false,
+      ms: Date.now() - started,
+      items: 0,
+      error: lastError.replace(/https?:\/\/\S+/g, "上游地址"),
+    };
+  }
+
   // 推荐页：红果各榜单按真实评分合并后的稳定列表，按页切分给前端。
   async function recommend(page = 1) {
     const pageNo = Number(page) || 1;
@@ -445,5 +520,5 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
-  return { home, category, search, searchAll, recommend, detail, play };
+  return { home, category, search, searchAll, recommend, detail, play, health, warmup };
 }

@@ -3,6 +3,7 @@ import vm from "node:vm";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import axios from "axios";
+import { fail } from "./errors.mjs";
 
 // Trusted, pinned GPL source. This is a compatibility wrapper, not a sandbox for user scripts.
 const source = fs.readFileSync(
@@ -206,27 +207,77 @@ export const provider = {
     }
     return recommendPoolPending;
   },
-  async stream(id, fresh = false) {
+  async stream(id, fresh = false, track = true) {
     if (fresh) {
       api.streamCache.delete(`${id}|auto`);
       api.videoInfoCache.delete(id);
     }
-    const stream = await api.resolveStream(id, "auto");
-    const prepared = await api.prepareHeader(stream);
+    const now = Date.now();
+    if (STREAM_BREAKER.openUntil > now) {
+      throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用，正在自动恢复，请切换数据源或稍后重试");
+    }
+    if (track) METRICS.attempts += 1;
+    try {
+      const stream = await api.resolveStream(id, "auto");
+      const prepared = await api.prepareHeader(stream);
+      if (track) {
+        STREAM_BREAKER.fails = 0;
+        STREAM_BREAKER.openUntil = 0;
+      }
+      return {
+        total: prepared.total,
+        chunk: async (start, end) =>
+          api.decryptPartial(
+            (await api.remoteRange(stream, start, end)).data,
+            start,
+            stream.key,
+            prepared
+          ),
+      };
+    } catch (error) {
+      const message = String((error && error.message) || error);
+      if (track) {
+        STREAM_BREAKER.fails += 1;
+        STREAM_BREAKER.lastError = message;
+        METRICS.failures += 1;
+        METRICS.lastError = message;
+        METRICS.lastErrorAt = Date.now();
+      }
+      if (/空响应|video_model|video_tab|device_register/.test(message)) {
+        if (track) METRICS.empty += 1;
+        if (track && STREAM_BREAKER.fails >= STREAM_BREAKER_THRESHOLD) {
+          STREAM_BREAKER.openUntil = Date.now() + STREAM_BREAKER_COOLDOWN;
+        }
+        throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用：" + message);
+      }
+      throw fail("UPSTREAM_ERROR", "红果播放源异常：" + message);
+    }
+  },
+  metrics() {
     return {
-      total: prepared.total,
-      chunk: async (start, end) =>
-        api.decryptPartial(
-          (await api.remoteRange(stream, start, end)).data,
-          start,
-          stream.key,
-          prepared
-        ),
+      stream: {
+        attempts: METRICS.attempts,
+        failures: METRICS.failures,
+        empty: METRICS.empty,
+        lastError: METRICS.lastError,
+        lastErrorAt: METRICS.lastErrorAt,
+      },
+      breaker: {
+        fails: STREAM_BREAKER.fails,
+        open: STREAM_BREAKER.openUntil > Date.now(),
+        openUntil: STREAM_BREAKER.openUntil,
+        lastError: STREAM_BREAKER.lastError,
+      },
     };
   },
 };
 
 // Limit the pinned upstream's otherwise unbounded caches during long-lived home use.
+const STREAM_BREAKER_THRESHOLD = 3;
+const STREAM_BREAKER_COOLDOWN = 45000;
+const STREAM_BREAKER = { fails: 0, openUntil: 0, lastError: "" };
+const METRICS = { attempts: 0, failures: 0, empty: 0, lastError: "", lastErrorAt: 0 };
+
 const CACHE_TTL = 300000;
 const CACHE_MAX = 100;
 setInterval(() => {

@@ -31,10 +31,10 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.6.0","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
-`healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。
+`healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑四项冒烟（health / 源列表 / 首页 / 源自检）。
 
 ### 1.4 改配置（直接改 compose.yaml）
 
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.6.0
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.0
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -142,7 +142,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 
 - **切换源**：顶栏「源」下拉框；内置红果 + 随包附带的七猫/西饭/星芽/牛牛等 JS 源。
 - **聚合搜索**：下拉框选「🔎 全部源（聚合搜索）」后搜索，会**并发查询所有可用源、谁先返回先展示**（慢源不阻塞），卡片左上角带源名徽标，点开卡片自动带上所属源。顶部提示条实时显示「已返回 X/Y 个源、共 N 条」及各源命中数/失败原因；模板与示例源不参与聚合。
-- **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、展开最近运行日志、删除导入源（内置源不可删）。有上游地址的源会显示「自动更新」开关，面板底部「检查源更新」可立即检查全部源；更新失败只记录错误并保留旧版本。
+- **源管理**：点「⚙ 源」打开面板，可看每个源的版本/类型/是否使用中，一键启用、点「自检」做连通性检查（默认校验首页/详情，按住 Shift 点击会对内置红果真实取流校验首块是否为 ftyp，较慢）、展开最近运行日志、删除导入源（内置源不可删）。有上游地址的源会显示「自动更新」开关，面板底部「检查源更新」可立即检查全部源；更新失败只记录错误并保留旧版本。
 - **导入源**：点「＋源」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。按 URL 导入的源会记住地址并默认自动更新（仅 HTTPS）；直接粘贴源码的源若 meta 里带 `updateUrl` 也会自动更新。
 - **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
 - **无限滚动**：首页、分类、搜索结果和推荐页滑到底部会自动加载下一页；「加载更多」按钮仍保留作为兜底（自动加载不可用时手动点）。
@@ -199,6 +199,7 @@ hongguo-web/
 │  ├─ db.mjs               # SQLite（node:sqlite）：用户/令牌/历史/收藏/追更
 │  ├─ users.mjs            # 账号与个人数据读写（UserStore）
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
+│  ├─ scripts/smoke.mjs    # 发布冒烟：health/源/首页/源自检
 │  └─ sources/
 │     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时装配（每源独立 worker_threads，仅消息通道暴露 fetch）
 │     ├─ worker.mjs        # 源沙箱线程：node:vm 上下文 + resourceLimits，执行源并回传结果/日志
@@ -254,6 +255,7 @@ var spider = {
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 健康检查（含 `accounts` 是否启用账号系统） |
+| GET | `/api/metrics` | 运行指标：uptime、RSS、红果取流尝试/失败/空响应次数与熔断状态 |
 | POST | `/api/auth/register` | 注册：`{ "username": "…", "password": "…" }` → `{ token, user }` |
 | POST | `/api/auth/login` | 登录：同上 → `{ token, user }` |
 | POST | `/api/auth/logout` | 注销当前令牌 |
@@ -269,6 +271,7 @@ var spider = {
 | POST | `/api/sources/import` | 导入源：`{ "url": "…" }` 或 `{ "code": "…" }` |
 | POST | `/api/sources/active` | 切换启用源：`{ "id": "qimao" }` |
 | GET | `/api/sources/:id/log` | 源最近运行日志 |
+| GET | `/api/sources/:id/health` | 源健康检查：默认校验首页/详情可达；`?deep=1` 时内置红果额外走 home→detail→stream 真实取流（首块 ftyp），JS 源校验首页可达 |
 | DELETE | `/api/sources/:id` | 删除用户源（内置源不可删） |
 | POST | `/api/sources/check-updates` | 立即检查所有可自动更新的 JS 源（`{ "force": false }` 走 ETag） |
 | POST | `/api/sources/:id/check-update` | 立即检查单个源更新 |
@@ -293,6 +296,7 @@ var spider = {
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
 - **红果内置流是 HEVC 1080×1920**：需要浏览器支持 HEVC/H.265 解码（Edge、Chrome 在支持硬解的机器上正常，实测 Edge 可直接播放）；缺 HEVC 支持的环境会黑屏或报解码错误，可改用 JS 源。
+- **红果取址协议会变动**：内置源已适配 2026-11 的 `video_tab` 取址 + 每次新注册设备身份；若上游再次变更，连续 3 次取流失败会熔断 45 秒并在播放器显示「重试 / 换数据源」，无需重启容器。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
 - **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。

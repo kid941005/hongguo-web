@@ -27,6 +27,7 @@ const STATUS = {
   TIMEOUT: 504,
   UPSTREAM: 502,
   UPSTREAM_ERROR: 502,
+  UPSTREAM_EMPTY: 503,
 };
 
 const GENERIC_MESSAGE = "内容源暂不可用，请稍后重试";

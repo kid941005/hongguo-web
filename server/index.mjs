@@ -53,6 +53,10 @@ server.listen(PORT, HOST, () => {
   console.log(
     JSON.stringify({ event: "listening", url: "http://" + HOST + ":" + PORT, version, active: sources.activeId, sources: sources.list().sources.length }),
   );
+  // 后台预热搜索池（不阻塞启动，失败只记日志）。
+  setTimeout(() => {
+    Promise.resolve(catalog.warmup && catalog.warmup()).catch(() => {});
+  }, 1500).unref();
   if (SOURCE_AUTO_UPDATE) {
     sources.startAutoUpdate({
       intervalMs: SOURCE_UPDATE_INTERVAL_HOURS * 60 * 60 * 1000,

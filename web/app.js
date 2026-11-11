@@ -484,6 +484,8 @@
       state.source = r.active || (state.sources[0] && state.sources[0].id) || '';
       var sel = $('sourceSelect'); sel.textContent = '';
       state.sources.forEach(function (s) {
+        // 示例/模板源不进入日常下拉，避免用户误选到空源（它们仍保留在源管理面板）。
+        if (s.id === 'template' || s.id === 'maccms') return;
         var o = document.createElement('option'); o.value = s.id;
         o.textContent = s.name + (s.type === 'builtin' ? '' : ' · JS') + '  v' + s.version;
         if (s.id === state.source) o.selected = true;
@@ -875,6 +877,54 @@
     if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   }
 
+  // ---- 播放错误提示、加载超时与一键切源 ----
+  var playWatchdog = null;
+  function clearPlayWatchdog() { if (playWatchdog) { clearTimeout(playWatchdog); playWatchdog = null; } }
+  function hidePlayerError() {
+    clearPlayWatchdog();
+    var box = $('playerError'); if (box) box.classList.add('hidden');
+  }
+  function showPlayerError(msg) {
+    clearPlayWatchdog();
+    var box = $('playerError'); if (!box) return;
+    $('playerErrorText').textContent = msg || '播放失败，请重试或切换数据源。';
+    box.classList.remove('hidden');
+  }
+  function armPlayWatchdog() {
+    clearPlayWatchdog();
+    playWatchdog = setTimeout(function () {
+      var v = $('video');
+      if (v && v.readyState < 1) showPlayerError('播放加载超时（8 秒未响应），可能是当前数据源受限，请换源或重试。');
+    }, 8000);
+  }
+  function onVideoError() {
+    var v = $('video'); if (!v || !state.detail) return;
+    var code = v.error ? v.error.code : 0;
+    var msg = code === 4
+      ? '视频源不可用或格式不受支持（MEDIA_ERR_SRC_NOT_SUPPORTED），可能是当前数据源受限，请换源或重试。'
+      : '播放失败（错误码 ' + code + '），请换源或重试。';
+    showPlayerError(msg);
+    toast('播放失败，请换源或重试');
+  }
+  function retryPlayback() {
+    hidePlayerError();
+    if (!state.detail) { toast('请重新选择剧集'); return; }
+    playEpisode(state.line || 0, state.epIdx || 0, $('video').currentTime || 0, false);
+  }
+  function switchPlaybackSource() {
+    var current = state.source;
+    var list = (state.sources || []).filter(function (item) {
+      return item.id !== current && item.id !== '__all' && item.id !== 'template' && item.id !== 'maccms';
+    });
+    if (!list.length) { toast('没有其他可用数据源'); return; }
+    var next = list[0];
+    closePlayer();
+    toast('正在切换到 ' + (next.name || next.id) + '…');
+    setActiveSource(next.id).then(function () {
+      toast('已切换到 ' + (next.name || next.id) + '，请重新选择剧集');
+    }).catch(function (e) { toast('切换失败：' + e.message); });
+  }
+
   function openPlayer(url, type, startAt, auto) {
     var v = $('video');
     url = authUrl(url);
@@ -884,6 +934,7 @@
     state.levels = [];
     updateQualityBtn();
     destroyHls();
+    hidePlayerError();
     // 从直链切到 HLS（或反过来）时先清掉旧的 src，避免残留地址干扰新的播放源。
     v.removeAttribute('src');
     try { v.load(); } catch (e) {}
@@ -909,6 +960,7 @@
             else recovered = false;
             if (recovered) { toast('播放异常，正在自动重试…'); return; }
           }
+          showPlayerError('HLS 流播放失败：' + (data.details || '流错误'));
           toast('播放失败：' + (data.details || '流错误'));
         });
       } else {
@@ -919,6 +971,7 @@
     }
     applyRate();
     state.autoNextLatch = false;
+    armPlayWatchdog();
     var p = v.play();
     if (p && p.catch) p.catch(function (err) {
       if (!err) return;
@@ -931,7 +984,8 @@
         toast('已静音自动续播，点音量可恢复声音');
         return;
       }
-      toast('播放失败：' + (err.message || '未知错误'));
+      var msg = '播放失败：' + (err.message || '未知错误');
+      toast(msg); showPlayerError(msg + '。可尝试换源或重试。');
     });
   }
 
@@ -1034,6 +1088,7 @@
 
   function closePlayer() {
     var v = $('video');
+    hidePlayerError();
     state.autoNextLatch = false;
     saveProgress(v);
     try { v.pause(); } catch (e) {}
@@ -1198,6 +1253,7 @@
       errTag.title = s.lastError;
       tags.appendChild(errTag);
     }
+    if (s.id === 'template' || s.id === 'maccms') tags.appendChild(tag('示例', 'warn'));
     if (s.id === activeId) tags.appendChild(tag('使用中', 'on'));
     info.appendChild(name); info.appendChild(idEl); info.appendChild(tags);
     head.appendChild(info);
@@ -1218,6 +1274,10 @@
       autoBtn.addEventListener('click', function () { toggleSourceAuto(s); });
       acts.appendChild(autoBtn);
     }
+    var healthBtn = document.createElement('button'); healthBtn.className = 'btn ghost mini'; healthBtn.textContent = '自检';
+    healthBtn.title = '快速自检；按住 Shift 点击会真实取流（较慢）';
+    healthBtn.addEventListener('click', function (e) { checkSourceHealth(row, s.id, healthBtn, e.shiftKey); });
+    acts.appendChild(healthBtn);
     var logBtn = document.createElement('button'); logBtn.className = 'btn ghost mini'; logBtn.textContent = '日志';
     logBtn.addEventListener('click', function () { toggleLog(row, s.id, logBtn); });
     acts.appendChild(logBtn);
@@ -1229,6 +1289,28 @@
     head.appendChild(acts);
     row.appendChild(head);
     return row;
+  }
+
+  // 手动触发单个源健康检查（内置红果会真实取流校验）。
+  function checkSourceHealth(row, id, btn, deep) {
+    var old = row.querySelector('.srchealth');
+    if (old) old.remove();
+    btn.disabled = true; btn.textContent = '自检中…';
+    var line = document.createElement('div'); line.className = 'srchealth';
+    line.textContent = '正在检查 ' + id + ' …';
+    row.appendChild(line);
+    api('/api/sources/' + encodeURIComponent(id) + '/health' + (deep ? '?deep=1' : '')).then(function (r) {
+      var parts = ['首页 ' + (r.items || 0) + ' 条'];
+      if (r.playback) parts.push('取流 ' + (r.playback.ok ? '正常' : '异常') + (r.playback.backup ? '（已用备用线路）' : '') + '（' + (r.playback.total || 0) + ' 字节）');
+      if (r.playback && r.playback.error) parts.push('取流错误：' + r.playback.error);
+      if (r.error) parts.push('错误：' + r.error);
+      var level = !r.ok ? '❌ ' : (r.degraded ? '⚠️ ' : '✅ ');
+      line.textContent = level + id + ' · ' + parts.join(' · ') + ' · ' + (r.ms || 0) + 'ms';
+      line.className = 'srchealth ' + (!r.ok ? 'bad' : (r.degraded ? 'warn' : 'ok'));
+    }).catch(function (e) {
+      line.textContent = '❌ ' + id + ' 自检失败：' + e.message;
+      line.className = 'srchealth bad';
+    }).then(function () { btn.disabled = false; btn.textContent = '自检'; });
   }
 
   function toggleLog(row, id, btn) {
@@ -1315,6 +1397,11 @@
   }
   $('btnBack').addEventListener('click', function () { setView('home'); });
   $('btnClosePlayer').addEventListener('click', closePlayer);
+  $('btnPlayerRetry').addEventListener('click', retryPlayback);
+  $('btnPlayerSwitch').addEventListener('click', switchPlaybackSource);
+  $('video').addEventListener('error', onVideoError);
+  $('video').addEventListener('loadedmetadata', hidePlayerError);
+  $('video').addEventListener('playing', hidePlayerError);
   $('btnNext').addEventListener('click', nextEpisode);
   $('btnImport').addEventListener('click', openImport);
   $('btnManage').addEventListener('click', openManage);

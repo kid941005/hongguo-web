@@ -124,6 +124,13 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
         accounts: Boolean(users),
       })],
 
+    ["GET", /^\/api\/metrics$/, ({ json }) =>
+      json(200, {
+        uptime: Math.round(process.uptime()),
+        rss: process.memoryUsage().rss,
+        ...(typeof provider.metrics === "function" ? provider.metrics() : {}),
+      })],
+
     // ---- 账号（注册 / 登录 / 会话） ----
     ["POST", /^\/api\/auth\/register$/, async (ctx) => {
       if (!users) throw fail("NOT_FOUND", "账号系统未启用");
@@ -251,6 +258,8 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     }],
     ["GET", /^\/api\/sources\/([\w.\-]+)\/log$/, ({ json, params }) =>
       json(200, { id: params[0], log: sources.logs(params[0]) })],
+    ["GET", /^\/api\/sources\/([\w.\-]+)\/health$/, async ({ json, params, q }) =>
+      json(200, await catalog.health(params[0], { deep: q.get("deep") === "1" }))],
     ["DELETE", /^\/api\/sources\/([\w.\-]+)$/, ({ json, params }) =>
       json(200, { ok: true, ...sources.remove(params[0]) })],
 
