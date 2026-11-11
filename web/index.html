@@ -25,15 +25,26 @@
       <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
       <button id="btnSearch" class="btn">搜索</button>
     </div>
-    <button id="btnAccount" class="btn ghost" title="登录 / 注册（多设备同步）">登录</button>
+    <span class="tbgroup tbg-account">
+      <span class="tbglabel">账号</span>
+      <button id="btnAccount" class="btn ghost" title="登录（多设备同步）">👤 登录</button>
+      <button id="btnRegister" class="btn ghost" title="注册新账号">注册</button>
+      <button id="btnLogout" class="btn ghost hidden" title="退出登录">退出</button>
+    </span>
   </div>
   <div class="tb-tools">
-    <select id="sourceSelect" class="select" title="切换数据源"></select>
-    <button id="btnImport" class="btn ghost" title="导入糖葫芦风格 JS 源">＋源</button>
-    <button id="btnManage" class="btn ghost" title="源管理：启用 / 日志 / 删除">⚙ 源</button>
-    <button id="btnHistory" class="btn ghost" title="观看历史">🕘 历史</button>
-    <button id="btnFavs" class="btn ghost" title="我的收藏">☆ 收藏</button>
-    <button id="btnFollows" class="btn ghost" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
+    <span class="tbgroup">
+      <span class="tbglabel">源</span>
+      <select id="sourceSelect" class="select" title="目前使用的数据源（点击切换）"></select>
+      <button id="btnImport" class="btn ghost" title="新增糖葫芦风格 JS 源">＋ 新增</button>
+      <button id="btnManage" class="btn ghost" title="管理数据源：启用 / 日志 / 删除">⚙ 管理</button>
+    </span>
+    <span class="tbgroup">
+      <span class="tbglabel">历史</span>
+      <button id="btnHistory" class="btn ghost" title="在看：观看历史与续播">🕘 在看</button>
+      <button id="btnFavs" class="btn ghost" title="我的收藏">☆ 收藏</button>
+      <button id="btnFollows" class="btn ghost" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
+    </span>
   </div>
 </header>
 

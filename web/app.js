@@ -134,10 +134,16 @@
   function setUserToken(t) { try { if (t) localStorage.setItem(UTOKEN_KEY, t); else localStorage.removeItem(UTOKEN_KEY); } catch (e) {} }
 
   function renderAccount() {
-    var b = $('btnAccount'); if (!b) return;
-    b.textContent = state.user ? ('👤 ' + state.user.username) : '登录';
-    b.title = state.user ? ('已登录：' + state.user.username + '（点击退出登录）') : '登录 / 注册（多设备同步）';
-    b.classList.toggle('on', !!state.user);
+    var logged = !!state.user;
+    var b = $('btnAccount');
+    if (b) {
+      b.textContent = logged ? ('👤 ' + state.user.username) : '👤 登录';
+      b.title = logged ? ('已登录：' + state.user.username) : '登录（多设备同步）';
+      b.classList.toggle('on', logged);
+    }
+    // 账号分组：未登录显示「登录 / 注册」，已登录显示「用户名 / 退出」。
+    var reg = $('btnRegister'); if (reg) reg.classList.toggle('hidden', logged);
+    var out = $('btnLogout'); if (out) out.classList.toggle('hidden', !logged);
   }
   function refreshMe() {
     if (!userToken()) { state.user = null; renderAccount(); return Promise.resolve(null); }
@@ -1531,8 +1537,12 @@
     toast('已清空观看历史');
   });
   $('btnAccount').addEventListener('click', function () {
-    if (state.user) { if (window.confirm('退出登录？本机观看记录会保留。')) logout(); }
+    if (state.user) toast('已登录：' + state.user.username);
     else openAuth('login');
+  });
+  $('btnRegister').addEventListener('click', function () { openAuth('register'); });
+  $('btnLogout').addEventListener('click', function () {
+    if (window.confirm('退出登录？本机观看记录会保留。')) logout();
   });
   $('btnFavs').addEventListener('click', openFavs);
   $('btnFollows').addEventListener('click', openFollows);

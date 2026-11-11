@@ -13,10 +13,14 @@ body{padding-bottom:40px}
   padding:8px 16px;background:rgba(11,13,18,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
 /* 第一行：品牌 + 版本 + 导航 + 搜索 + 账号；第二行：数据源与功能按钮（可横向滚动，永不撑破页面） */
 .tb-main{display:flex;gap:10px;align-items:center;min-width:0}
-.tb-tools{display:flex;gap:8px;align-items:center;overflow-x:auto;-webkit-overflow-scrolling:touch;
+.tb-tools{display:flex;gap:16px;align-items:center;overflow-x:auto;-webkit-overflow-scrolling:touch;
   scrollbar-width:none;padding-bottom:1px}
 .tb-tools::-webkit-scrollbar{display:none}
-.tb-tools>.btn,.tb-tools>.select{flex:0 0 auto}
+/* 分组：源（目前 / 新增 / 管理）、历史（在看 / 收藏 / 追剧）、账号（登录 / 注册 / 退出） */
+.tbgroup{display:flex;align-items:center;gap:8px;padding-left:12px;border-left:1px solid var(--line)}
+.tbgroup:first-child{border-left:0;padding-left:0}
+.tbglabel{font-size:12px;color:var(--muted);white-space:nowrap;letter-spacing:.5px}
+.tbgroup>.btn,.tbgroup>.select{flex:0 0 auto}
 .brand{font-weight:700;font-size:17px;white-space:nowrap;color:#fff}
 .brand span{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .brand .ver{display:inline-block;margin-left:6px;padding:2px 7px;border:1px solid var(--line);border-radius:999px;background:var(--panel2);color:var(--muted);font-size:10.5px;font-weight:500;line-height:1.4;vertical-align:middle;letter-spacing:.2px;white-space:nowrap}
@@ -26,7 +30,7 @@ input,textarea,.select{background:var(--panel2);border:1px solid var(--line);col
   border-radius:10px;padding:9px 12px;font-size:14px;outline:none}
 input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 .nav{display:flex;gap:6px;align-items:center;flex:0 0 auto}
-#btnAccount{flex:0 0 auto}
+.tbg-account{border-left:1px solid var(--line);padding-left:10px;flex:0 0 auto}
 .navbtn{background:transparent;border:1px solid var(--line);color:var(--muted);
   padding:7px 12px;border-radius:10px;font-size:14px;cursor:pointer;white-space:nowrap}
 .navbtn:hover{color:#fff}
@@ -184,11 +188,12 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
   .tb-main{flex-wrap:wrap;gap:8px 10px}
   .brand{order:1}
   .nav{order:1}
-  #btnAccount{order:2;margin-left:auto}
+  .tbg-account{order:2;margin-left:auto}
   .searchbox{order:3;flex:1 1 100%;max-width:none;width:100%}
 }
 @media (max-width:680px){
   #main{padding:12px}
+  .tbglabel{display:none}
   .topbar{padding:8px 10px}
   .brand{font-size:15px}
   .navbtn{padding:6px 10px;font-size:13px}
