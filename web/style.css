@@ -9,18 +9,24 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif}
 body{padding-bottom:40px}
 .hidden{display:none !important}
-.topbar{position:sticky;top:0;z-index:20;display:flex;gap:12px;align-items:center;
-  padding:10px 16px;background:rgba(11,13,18,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.topbar{position:sticky;top:0;z-index:20;display:flex;flex-direction:column;gap:8px;
+  padding:8px 16px;background:rgba(11,13,18,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+/* 第一行：品牌 + 版本 + 导航 + 搜索 + 账号；第二行：数据源与功能按钮（可横向滚动，永不撑破页面） */
+.tb-main{display:flex;gap:10px;align-items:center;min-width:0}
+.tb-tools{display:flex;gap:8px;align-items:center;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  scrollbar-width:none;padding-bottom:1px}
+.tb-tools::-webkit-scrollbar{display:none}
+.tb-tools>.btn,.tb-tools>.select{flex:0 0 auto}
 .brand{font-weight:700;font-size:17px;white-space:nowrap;color:#fff}
 .brand span{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .brand .ver{display:inline-block;margin-left:6px;padding:2px 7px;border:1px solid var(--line);border-radius:999px;background:var(--panel2);color:var(--muted);font-size:10.5px;font-weight:500;line-height:1.4;vertical-align:middle;letter-spacing:.2px;white-space:nowrap}
-.searchbox{flex:1;display:flex;gap:8px;max-width:560px}
-.searchbox input{flex:1;min-width:120px}
+.searchbox{flex:1;display:flex;gap:8px;min-width:0;max-width:560px}
+.searchbox input{flex:1;min-width:90px}
 input,textarea,.select{background:var(--panel2);border:1px solid var(--line);color:var(--text);
   border-radius:10px;padding:9px 12px;font-size:14px;outline:none}
 input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
-.right{display:flex;gap:8px;align-items:center}
-.nav{display:flex;gap:6px;align-items:center}
+.nav{display:flex;gap:6px;align-items:center;flex:0 0 auto}
+#btnAccount{flex:0 0 auto}
 .navbtn{background:transparent;border:1px solid var(--line);color:var(--muted);
   padding:7px 12px;border-radius:10px;font-size:14px;cursor:pointer;white-space:nowrap}
 .navbtn:hover{color:#fff}
@@ -35,11 +41,12 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
   border-radius:999px;font-size:13px;cursor:pointer}
 .chip:hover{color:#fff}
 .chip.active{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff;border-color:transparent}
+.banners{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
 .notice{background:#2a1f14;border:1px solid #4a3a22;color:#f3c98b;padding:10px 14px;
-  border-radius:10px;font-size:13px;margin-bottom:14px}
+  border-radius:10px;font-size:13px}
 /* 播放通道告警横幅：比 notice 更醒目（红果通道失效属于「主源不可用」，要用户立刻看到） */
 .healthbar{background:#3a1d1d;border:1px solid #7a2f2f;color:#ffb3b3;padding:10px 14px;
-  border-radius:10px;font-size:13px;margin-bottom:14px;line-height:1.5}
+  border-radius:10px;font-size:13px;line-height:1.5}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
 .card{position:relative;background:var(--panel);border-radius:var(--radius);overflow:hidden;cursor:pointer;
   border:1px solid transparent;transition:.15s;display:flex;flex-direction:column}
@@ -173,10 +180,12 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 
 /* 自适应：中等宽度时工具条换行，搜索框独占一行 */
 @media (max-width:1000px){
-  .topbar{flex-wrap:wrap;gap:8px 10px;padding:8px 12px}
-  .searchbox{order:3;width:100%;max-width:none}
-  .right{order:2;margin-left:auto;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px}
-  .right .btn,.right .select{flex:0 0 auto}
+  .topbar{padding:8px 12px}
+  .tb-main{flex-wrap:wrap;gap:8px 10px}
+  .brand{order:1}
+  .nav{order:1}
+  #btnAccount{order:2;margin-left:auto}
+  .searchbox{order:3;flex:1 1 100%;max-width:none;width:100%}
 }
 @media (max-width:680px){
   #main{padding:12px}

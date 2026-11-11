@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.3","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.4","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑四项冒烟（health / 源列表 / 首页 / 源自检）。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.3
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.4
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -158,7 +158,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **收藏 / 追剧提醒**：详情页「☆ 收藏」「🔔 追更」；顶栏「☆ 收藏」「🔔 追剧」打开列表。追更会定时（默认 10 分钟，打开面板或页面重新可见时也会）检查集数变化，有新集时角标显示新增集数并弹出提示，面板里点「检查更新」可立即检查。
 - **多设备同步**：历史、收藏、追更都存在服务端 SQLite（`DATA_DIR/hongguo.db`）。本地历史与服务端按时间戳取新合并，旧进度不会覆盖新进度。
 - **PWA（装到桌面/手机主屏）**：Chrome/Edge 地址栏右侧会出现「安装」；手机浏览器「添加到主屏幕」后以独立窗口运行。Service Worker 需要安全上下文（`http://localhost` 或 HTTPS），用局域网 IP 的纯 HTTP 打开时页面可用但没有离线缓存、不能安装。
-- **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，选择记在 localStorage）、清晰度切换（仅 HLS 多码率源出现，单码率自动隐藏）、全屏（按钮 / 双击画面 / F 键）。
+- **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，控制条实时显示当前倍速；刷新页面、换集都会保持，点开新剧默认 1.0×）。未登录时记在本机，登录后随账号**跨设备同步**（服务端 SQLite），不同账号各存各的；清空浏览器缓存后回到 1.0×。清晰度切换（仅 HLS 多码率源出现，单码率自动隐藏）、全屏（按钮 / 双击画面 / F 键）。
 - **深链**：`/?rec=1`（直接打开推荐页）、`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
 
 ## 3.1 前端存储
@@ -166,7 +166,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | key | 位置 | 内容 |
 | --- | --- | --- |
 | `hg_watch_v1` | 浏览器 localStorage | 观看历史（source/id/title/cover/lineIdx/epIdx/pos/dur/at），最多 100 条；登录后同步到服务端（未登录只存本地） |
-| `hg_rate_v1` | 浏览器 localStorage | 上次选择的播放倍速 |
+| `hg_rate_v1` | 浏览器 localStorage | 上次选择的播放倍速（未登录时的本机缓存；登录后以服务端 `prefs` 为准并跨设备同步，按账号隔离） |
 | `hg_user_token` | 浏览器 localStorage | 登录令牌（30 天有效），退出登录即清除 |
 
 ## 3.2 播放器快捷键
@@ -274,6 +274,7 @@ var spider = {
 | GET/POST | `/api/me/follows` | 追剧列表 / 新增（`{source,id,title,cover}`） |
 | DELETE | `/api/me/follows/:source/:id` | 取消追剧 |
 | GET | `/api/me/follows/updates?force=1` | 检查追更（默认 10 分钟节流），返回 `{updates:[{source,id,title,added,epCount}],follows}` |
+| GET/PUT | `/api/me/prefs` | 个人偏好（目前只有播放倍速）：GET 返回 `{prefs:{rate,updatedAt}}`，PUT 提交 `{rate}`（取值 0.5/0.75/1/1.25/1.5/2） |
 | GET | `/api/sources` | 源列表 + 当前启用源 |
 | POST | `/api/sources/import` | 导入源：`{ "url": "…" }` 或 `{ "code": "…" }` |
 | POST | `/api/sources/active` | 切换启用源：`{ "id": "qimao" }` |

@@ -15,31 +15,35 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand" id="brand">🍒 <span>红果短剧</span><small id="appVersion" class="ver" title="当前版本">v…</small></div>
-  <nav class="nav">
-    <button id="btnHome" class="navbtn active">首页</button>
-    <button id="btnRecommend" class="navbtn">🔥 推荐</button>
-  </nav>
-  <div class="searchbox">
-    <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
-    <button id="btnSearch" class="btn">搜索</button>
+  <div class="tb-main">
+    <div class="brand" id="brand">🍒 <span>红果短剧</span><small id="appVersion" class="ver" title="当前版本">v…</small></div>
+    <nav class="nav">
+      <button id="btnHome" class="navbtn active">首页</button>
+      <button id="btnRecommend" class="navbtn">🔥 推荐</button>
+    </nav>
+    <div class="searchbox">
+      <input id="q" type="search" placeholder="搜索剧名…" autocomplete="off" />
+      <button id="btnSearch" class="btn">搜索</button>
+    </div>
+    <button id="btnAccount" class="btn ghost" title="登录 / 注册（多设备同步）">登录</button>
   </div>
-  <div class="right">
+  <div class="tb-tools">
     <select id="sourceSelect" class="select" title="切换数据源"></select>
     <button id="btnImport" class="btn ghost" title="导入糖葫芦风格 JS 源">＋源</button>
     <button id="btnManage" class="btn ghost" title="源管理：启用 / 日志 / 删除">⚙ 源</button>
     <button id="btnHistory" class="btn ghost" title="观看历史">🕘 历史</button>
     <button id="btnFavs" class="btn ghost" title="我的收藏">☆ 收藏</button>
     <button id="btnFollows" class="btn ghost" title="追剧提醒">🔔 追剧<span id="followBadge" class="badge hidden"></span></button>
-    <button id="btnAccount" class="btn ghost" title="登录 / 注册（多设备同步）">登录</button>
   </div>
 </header>
 
 <main id="main">
   <div id="content">
+    <div id="banners" class="banners hidden">
+      <div id="healthBar" class="healthbar hidden"></div>
+      <div id="notice" class="notice hidden"></div>
+    </div>
     <div id="chips" class="chips"></div>
-    <div id="notice" class="notice hidden"></div>
-    <div id="healthBar" class="healthbar hidden"></div>
     <div id="grid" class="grid"></div>
     <div class="morebar"><button id="btnMore" class="btn ghost hidden">加载更多</button></div>
     <div id="sentinel" class="sentinel" aria-hidden="true"></div>
@@ -74,7 +78,7 @@
     <div class="player-bar">
       <span id="pTitle" class="ptitle"></span>
       <div class="pactions">
-        <button id="btnRate" class="btn ghost" title="播放倍速（快捷键 , 减速 / . 加速）">1.0×</button>
+        <button id="btnRate" class="btn ghost" title="播放倍速（点击切换，快捷键 , 减速 / . 加速；会记住你的选择）">1.0×</button>
         <button id="btnQuality" class="btn ghost hidden" title="清晰度（仅 HLS 多码率源可用）">自动</button>
         <button id="btnFull" class="btn ghost" title="全屏（快捷键 F）">全屏</button>
         <button id="btnNext" class="btn ghost" title="下一集（快捷键 N）">下一集</button>

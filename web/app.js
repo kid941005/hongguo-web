@@ -175,7 +175,8 @@
       setUserToken(r.token); state.user = r.user;
       $('authPass').value = '';
       renderAccount(); closeAuth(); toast('欢迎，' + r.user.username);
-      return Promise.all([mergeServerHistory(), loadFavs(), loadFollows()]).then(function () { checkUpdates(true, true); });
+      loadRate(); applyRate(); // 切换到该账号自己的倍速偏好（本地缓存），随后用服务端校正
+      return Promise.all([mergeServerHistory(), loadFavs(), loadFollows(), syncRateFromServer()]).then(function () { checkUpdates(true, true); });
     }).catch(function (e) {
       $('authMsg').className = 'impmsg err'; $('authMsg').textContent = e.message || '操作失败';
     }).then(function () { $('btnAuthOk').disabled = false; });
@@ -183,6 +184,7 @@
   function logout() {
     postJson('/api/auth/logout', {}).catch(function () {}).then(function () {
       setUserToken(''); state.user = null; state.favs = []; state.follows = []; setFollowBadge(0);
+      loadRate(); applyRate(); // 退出后回到未登录（访客）的倍速偏好
       renderAccount(); updateDetailActions();
       toast('已退出登录（本机观看记录仍保留）');
     });
@@ -409,10 +411,16 @@
     clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.add('hidden'); }, 3200);
   }
 
+  // 顶部两条横幅（公告 + 播放通道告警）共用一个容器，都隐藏时把容器也收起，避免占位。
+  function syncBanners() {
+    var wrap = $('banners'); if (!wrap) return;
+    var any = !$('healthBar').classList.contains('hidden') || !$('notice').classList.contains('hidden');
+    wrap.classList.toggle('hidden', !any);
+  }
   function showNotice(text) {
     var n = $('notice');
-    if (!text) { n.classList.add('hidden'); n.textContent = ''; return; }
-    n.textContent = text; n.classList.remove('hidden');
+    if (!text) { n.classList.add('hidden'); n.textContent = ''; syncBanners(); return; }
+    n.textContent = text; n.classList.remove('hidden'); syncBanners();
   }
 
   // ---- 播放通道健康横幅（/api/alerts）----
@@ -421,14 +429,14 @@
     var el = $('healthBar'); if (!el) return;
     state.health = s || null;
     if (!s || !s.enabled || s.status === 'ok' || s.status === 'unknown') {
-      el.classList.add('hidden'); el.textContent = '';
+      el.classList.add('hidden'); el.textContent = ''; syncBanners();
       return;
     }
     var txt = s.status === 'down'
       ? '红果播放通道不可用：' + (s.reason || '上游异常') + '。可点播放器里的「换数据源」，或直接换一部剧。'
       : '红果官网播放通道异常，已回落到备用通道' + (s.channel === 'app' ? '（画质可能降低）' : '') + '。';
     el.textContent = txt;
-    el.classList.remove('hidden');
+    el.classList.remove('hidden'); syncBanners();
   }
   function loadHealth() {
     return api('/api/alerts').then(renderHealthBar).catch(function () {});
@@ -834,30 +842,50 @@
     });
   }
 
-  // ---- 倍速 ----
+  // ---- 倍速（记住选择；登录后随账号跨设备同步到服务端） ----
   var RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
   var RATE_KEY = 'hg_rate_v1';
-
-  function loadRate() {
-    var raw = '1';
-    try { raw = localStorage.getItem(RATE_KEY) || '1'; } catch (e) { /* 隐私模式/localStorage 被禁用 */ }
+  // 未登录用同一 key；登录后按账号隔离成 <key>:u<id>，避免同一浏览器不同账号串味。
+  function rateKey() { return state.user ? (RATE_KEY + ':u' + state.user.id) : RATE_KEY; }
+  function readLocalRate() {
+    var raw = '';
+    try { raw = localStorage.getItem(rateKey()) || ''; } catch (e) { /* 隐私模式 / localStorage 被禁用 */ }
     var r = parseFloat(raw);
-    if (!isFinite(r) || RATES.indexOf(r) === -1) r = 1;
-    state.rate = r;
-    return r;
+    return (isFinite(r) && RATES.indexOf(r) !== -1) ? r : null;
+  }
+  function writeLocalRate(r) { try { localStorage.setItem(rateKey(), String(r)); } catch (e) {} }
+  // 读本地缓存；从没存过（首次 / 缓存被清空）就回落到 1.0×。
+  function loadRate() {
+    var r = readLocalRate();
+    state.rate = (r == null) ? 1 : r;
+    return state.rate;
   }
   function rateLabel(r) { return (r === 1 ? '1.0' : String(r)) + '×'; }
   function applyRate() {
     var v = $('video');
     try { v.playbackRate = state.rate; } catch (e) {}
-    $('btnRate').textContent = rateLabel(state.rate);
-    $('btnRate').classList.toggle('on', state.rate !== 1);
+    var btn = $('btnRate');
+    if (btn) { btn.textContent = rateLabel(state.rate); btn.classList.toggle('on', state.rate !== 1); }
+  }
+  function pushRate(r) {
+    if (!state.user) return;
+    putJson('/api/me/prefs', { rate: r }).catch(function () {});
+  }
+  // 登录后以服务端为准：服务端有记录就套用它（跨设备一致），没有就把本机当前倍速存上去。
+  function syncRateFromServer() {
+    if (!state.user) return Promise.resolve();
+    return api('/api/me/prefs').then(function (res) {
+      var srv = res && res.prefs ? Number(res.prefs.rate) : NaN;
+      if (RATES.indexOf(srv) !== -1) { state.rate = srv; writeLocalRate(srv); applyRate(); }
+      else pushRate(state.rate);
+    }).catch(function () {});
   }
   function setRate(r) {
     state.rate = r;
-    try { localStorage.setItem(RATE_KEY, String(r)); } catch (e) {}
+    writeLocalRate(r);
     applyRate();
     toast('倍速 ' + rateLabel(r));
+    pushRate(r);
   }
   function cycleRate(dir) {
     var i = RATES.indexOf(state.rate); if (i < 0) i = 2;
@@ -1099,6 +1127,9 @@
   function bindPlayerEvents() {
     var v = $('video');
     v.addEventListener('loadedmetadata', function () {
+      // 有些浏览器在换源/换集后会把 playbackRate 复位，元数据就绪时按记住的倍速再设一次。
+      try { v.playbackRate = state.rate; } catch (e) {}
+      $('btnRate').textContent = rateLabel(state.rate);
       if (state.pendingSeek > 3 && isFinite(v.duration) && state.pendingSeek < v.duration - 3) {
         try { v.currentTime = state.pendingSeek; } catch (e) {}
         toast('已续播至 ' + fmtDur(state.pendingSeek));
@@ -1583,7 +1614,8 @@
     if (sp.get('hist') === '1') openHistory();
     return refreshMe().then(function () {
       if (!state.user) return null;
-      return Promise.all([loadFavs(), loadFollows(), mergeServerHistory()]).then(function () { return checkUpdates(false, true); });
+      loadRate(); applyRate(); // 已登录：先套用该账号本地缓存的倍速
+      return Promise.all([loadFavs(), loadFollows(), mergeServerHistory(), syncRateFromServer()]).then(function () { return checkUpdates(false, true); });
     });
   }).catch(function (e) { showError(e); });
 })();

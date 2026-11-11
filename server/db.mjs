@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS follows (
 );
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_follows_user ON follows(user_id, created_at DESC);
+
+-- 用户偏好（目前只有播放倍速），随账号跨设备同步；每个账号一行。
+CREATE TABLE IF NOT EXISTS prefs (
+  user_id        INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  playback_rate  REAL NOT NULL DEFAULT 1,
+  updated_at     INTEGER NOT NULL
+);
 `;
 
 export function openDb(dataDir) {

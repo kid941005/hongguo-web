@@ -237,6 +237,14 @@ export function createServer({ provider, sources, catalog, users = null, monitor
       return ctx.json(200, { updates, follows: users.listFollows(u.id) });
     }],
 
+    // ---- 我的数据：偏好设置（播放倍速，跨设备同步） ----
+    ["GET", /^\/api\/me\/prefs$/, (ctx) => ctx.json(200, { prefs: users.getPrefs(requireUser(ctx).id) })],
+    ["PUT", /^\/api\/me\/prefs$/, async (ctx) => {
+      const u = requireUser(ctx);
+      const body = parseJsonBody(await readBody(ctx.req));
+      return ctx.json(200, { ok: true, prefs: users.setPrefs(u.id, body) });
+    }],
+
     // ---- 源管理 ----
     ["GET", /^\/api\/sources$/, ({ json }) => json(200, sources.list())],
     ["POST", /^\/api\/sources\/import$/, async ({ json, req }) => {

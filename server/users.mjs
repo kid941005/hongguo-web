@@ -4,6 +4,8 @@ import { fail } from "./errors.mjs";
 const DAY = 24 * 60 * 60 * 1000;
 const TOKEN_TTL = 30 * DAY;
 const USER_RE = /^[A-Za-z0-9_\u4e00-\u9fa5]{3,20}$/;
+// 允许的播放倍速（与前端 RATES 保持一致），服务端只落库这几个合法值。
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 function hashPassword(pw, salt) {
   return scryptSync(String(pw), salt, 64).toString("hex");
@@ -186,5 +188,26 @@ export class UserStore {
   touchFollow(userId, source, vodId, epCount) {
     this.db.prepare("UPDATE follows SET ep_count = ?, last_checked = ? WHERE user_id = ? AND source = ? AND vod_id = ?")
       .run(Math.max(0, Math.floor(epCount)), Date.now(), userId, str(source, 64), str(vodId, 128));
+  }
+
+  // ---- 偏好设置（播放倍速，跨设备同步） ----
+  // 返回 { rate, updatedAt }；没有记录时 rate 为 null（前端据此回落到 1.0×）。
+  getPrefs(userId) {
+    const row = this.db.prepare("SELECT playback_rate, updated_at FROM prefs WHERE user_id = ?").get(userId);
+    if (!row) return { rate: null, updatedAt: 0 };
+    const rate = Number(row.playback_rate);
+    return { rate: Number.isFinite(rate) ? rate : null, updatedAt: Number(row.updated_at) || 0 };
+  }
+
+  setPrefs(userId, item) {
+    const rate = num(item && item.rate, NaN);
+    if (!Number.isFinite(rate) || RATES.indexOf(rate) === -1)
+      throw fail("BAD_INPUT", "倍速取值无效（0.5 / 0.75 / 1 / 1.25 / 1.5 / 2）");
+    const now = Date.now();
+    this.db.prepare(
+      `INSERT INTO prefs (user_id, playback_rate, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET playback_rate = excluded.playback_rate, updated_at = excluded.updated_at`,
+    ).run(userId, rate, now);
+    return { rate, updatedAt: now };
   }
 }
