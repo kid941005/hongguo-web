@@ -48,8 +48,10 @@
     var opts = options || {};
     opts.headers = headers(opts.headers);
     return fetch(url, opts).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (body) {
-        if (!r.ok) { var e = new Error(body && body.error || ('HTTP ' + r.status)); e.code = body && body.code; throw e; }
+      return r.text().then(function (text) {
+        var body = {};
+        if (text) { try { body = JSON.parse(text); } catch (e) { body = { error: text.slice(0, 200) }; } }
+        if (!r.ok) { var err = new Error(body && body.error || ('HTTP ' + r.status)); err.code = body && body.code; throw err; }
         return body;
       });
     });
@@ -99,10 +101,10 @@
     e.at = Date.now();
     arr.unshift(e); histStore(arr);
     state.histKey = k;
-    schedulePush(e);
+    schedulePush(e, true);
     return e;
   }
-  function histUpdate(pos, dur) {
+  function histUpdate(pos, dur, immediate) {
     if (!state.histKey) return;
     var arr = histLoad(), hit = false;
     for (var i = 0; i < arr.length; i++) {
@@ -110,7 +112,7 @@
         arr[i].pos = pos; if (dur) arr[i].dur = dur; arr[i].at = Date.now(); hit = true; break;
       }
     }
-    if (hit) { histStore(arr); schedulePush(histFind(state.histKey)); }
+    if (hit) { histStore(arr); schedulePush(histFind(state.histKey), immediate === true); }
   }
   function histFind(k) {
     var arr = histLoad();
@@ -186,15 +188,23 @@
   }
 
   // 观看历史同步：登录后把本地与服务器记录按时间合并，并把本地新记录补推上去
-  var pushTimer = 0, pushQueue = null;
-  function schedulePush(entry) {
+  var pushTimer = 0, pushQueue = null, pushLast = 0;
+  var PUSH_INTERVAL = 30000;
+  function schedulePush(entry, immediate) {
     if (!state.user || !entry) return;
     pushQueue = entry;
+    var delay = 900;
+    if (!immediate) {
+      // 观看中每 5 秒都会更新进度，本地仍实时保存，但远端同步节流到 30 秒一次。
+      var since = Date.now() - pushLast;
+      delay = since >= PUSH_INTERVAL ? 900 : PUSH_INTERVAL - since;
+    }
     clearTimeout(pushTimer);
     pushTimer = setTimeout(function () {
+      pushTimer = 0;
       var e = pushQueue; pushQueue = null;
-      if (e) pushHistory(e);
-    }, 900);
+      if (e) { pushLast = Date.now(); pushHistory(e); }
+    }, delay);
   }
   function pushHistory(e) {
     if (!state.user || !e) return Promise.resolve();
@@ -543,7 +553,10 @@
     var p = state.page;
     if (state.mode === 'search' && state.aggregate) {
       setAutoMore(true);
-      return aggFetchPage(p, true);
+      return aggFetchPage(p, true).then(function (result) {
+        // 所有源这一页都失败时回退页码，避免下次滚动跳过一页。
+        if (result && result.attempted > 0 && result.failed === result.attempted) state.page -= 1;
+      });
     }
     var req;
     if (state.mode === 'recommend') req = api('/api/recommend', { page: p });
@@ -648,10 +661,13 @@
 
   function aggFetchPage(page, append) {
     var groups = state.aggGroups || [];
+    var attempted = 0;
+    var failed = 0;
     groups.forEach(function (g) { if (!append || g.hasMore) { g.loading = true; if (!append) g.error = ''; } });
     showNotice(aggNote());
     var jobs = groups.map(function (g) {
       if (append && !g.hasMore) { g.loading = false; return Promise.resolve(); }
+      attempted += 1;
       return api('/api/search', { source: g.id, q: state.q, page: page }).then(function (r) {
         var incoming = (r.items || []).map(function (it) {
           return Object.assign({}, it, { source: g.id, sourceName: g.name });
@@ -666,6 +682,7 @@
         }
       }).catch(function (e) {
         g.loading = false;
+        failed += 1;
         if (!append) { g.error = e && e.message ? e.message : '请求失败'; }
       }).then(function () {
         showNotice(aggNote());
@@ -679,6 +696,7 @@
       }
       state.loadingMore = false;
       setAutoMore(false);
+      return { attempted: attempted, failed: failed };
     });
   }
 
@@ -700,6 +718,7 @@
 
   function openDetail(id, src) {
     state.viewSource = src || (state.source === '__all' ? '' : cur());
+    state.detail = null;
     setView('detail');
     $('dTitle').textContent = '加载中…'; $('dMeta').textContent = ''; $('dDesc').textContent = ''; $('dTags').textContent = '';
     $('dCover').src = PLACEHOLDER; $('dEps').textContent = ''; $('dLines').textContent = '';
@@ -784,8 +803,9 @@
     api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id }).then(function (r) {
       openPlayer(r.url, r.type, startAt, autoNext);
     }).catch(function (e) {
-      if (autoNext) toast('下一集播放失败：' + ((e && e.message) || '未知错误'));
-      else showError(e);
+      var msg = (e && e.message) || '未知错误';
+      if (autoNext) toast('下一集播放失败：' + msg);
+      else { toast('播放失败：' + msg); showPlayerError(msg); }
     });
   }
 
@@ -1044,7 +1064,7 @@
     v.addEventListener('pause', function () { saveProgress(v); });
     v.addEventListener('ended', function () {
       var dur = Math.floor(v.duration || 0);
-      if (state.histKey) histUpdate(dur, dur);
+      if (state.histKey) histUpdate(dur, dur, true);
       scheduleAutoNext();
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
@@ -1143,13 +1163,14 @@
     var e = d ? histGet(state.viewSource, d.id) : null;
     if (!e || !e.pos) { bar.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
+    var finished = e.dur > 0 && e.pos >= e.dur - 2;
     var txt = document.createElement('div'); txt.className = 'resume-txt';
     var pct = e.dur ? Math.min(100, Math.round(e.pos / e.dur * 100)) : 0;
-    txt.textContent = '上次看到 ' + (e.epName || ('第 ' + ((e.epIdx || 0) + 1) + ' 集')) +
+    txt.textContent = (finished ? '已看完 ' : '上次看到 ') + (e.epName || ('第 ' + ((e.epIdx || 0) + 1) + ' 集')) +
       ' · ' + fmtDur(e.pos) + (e.dur ? ' / ' + fmtDur(e.dur) : '') +
       (e.dur ? '（' + pct + '%）' : '') + ' · ' + ago(e.at);
-    var go = document.createElement('button'); go.className = 'btn'; go.textContent = '继续播放';
-    go.addEventListener('click', function () { playEpisode(e.lineIdx || 0, e.epIdx || 0, e.pos || 0); });
+    var go = document.createElement('button'); go.className = 'btn'; go.textContent = finished ? '重新播放' : '继续播放';
+    go.addEventListener('click', function () { playEpisode(e.lineIdx || 0, e.epIdx || 0, finished ? 0 : (e.pos || 0)); });
     var del = document.createElement('button'); del.className = 'btn ghost mini'; del.textContent = '清除';
     del.addEventListener('click', function () {
       histRemove(state.viewSource, d.id);
@@ -1192,11 +1213,12 @@
       row.appendChild(info);
 
       var acts = document.createElement('div'); acts.className = 'histacts';
-      var go = document.createElement('button'); go.className = 'btn mini'; go.textContent = '续播';
+      var finished = e.dur > 0 && (e.pos || 0) >= e.dur - 2;
+      var go = document.createElement('button'); go.className = 'btn mini'; go.textContent = finished ? '重播' : '续播';
       go.addEventListener('click', function (ev) {
         ev.stopPropagation();
         closeHistory();
-        state.pendingResume = e;
+        state.pendingResume = finished ? Object.assign({}, e, { pos: 0 }) : e;
         openDetail(e.id, e.source || '');
       });
       var del = document.createElement('button'); del.className = 'btn ghost mini danger'; del.textContent = '删除';
@@ -1210,7 +1232,7 @@
 
       row.addEventListener('click', function () {
         closeHistory();
-        state.pendingResume = e;
+        state.pendingResume = finished ? Object.assign({}, e, { pos: 0 }) : e;
         openDetail(e.id, e.source || '');
       });
       box.appendChild(row);
@@ -1465,9 +1487,12 @@
     var src = sp.get('source') || '';
     if (src) {
       var sel = $('sourceSelect');
+      var matched = false;
       for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value === src) { sel.value = src; state.source = src; break; }
+        if (sel.options[i].value === src) { sel.value = src; state.source = src; matched = true; break; }
       }
+      // 链接里的源不在下拉中（如示例源）时回退到下拉当前值，避免地址与 state 不一致。
+      if (!matched && sel.value) state.source = sel.value;
     }
     var q = sp.get('q') || '';
     if (q) { $('q').value = q; doSearch(); return true; }

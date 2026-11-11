@@ -152,7 +152,9 @@ function responseHeaders(res) {
   return headers;
 }
 
-function wrapResponse(res, url, method) {
+const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+
+function wrapResponse(res, url, method, timeoutMs) {
   const headers = responseHeaders(res);
   const noBody = method === "HEAD" || res.statusCode < 200 || res.statusCode === 204 || res.statusCode === 304;
   const body = noBody ? null : Readable.toWeb(res);
@@ -162,7 +164,25 @@ function wrapResponse(res, url, method) {
     if (!bufferPromise) {
       bufferPromise = (async () => {
         const chunks = [];
-        for await (const chunk of res) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        let total = 0;
+        let idleTimer = null;
+        const armIdle = () => {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => res.destroy(timeoutError()), timeoutMs > 0 ? timeoutMs : 30000);
+          if (idleTimer.unref) idleTimer.unref();
+        };
+        armIdle();
+        try {
+          for await (const chunk of res) {
+            armIdle();
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            total += buffer.length;
+            if (total > MAX_BUFFERED_BYTES) throw fail("TOO_BIG", "上游响应超过 64MB 上限");
+            chunks.push(buffer);
+          }
+        } finally {
+          if (idleTimer) clearTimeout(idleTimer);
+        }
         return Buffer.concat(chunks);
       })();
     }
@@ -255,7 +275,7 @@ function requestOnce(parsed, { method, headers, body, signal, timeoutMs, allowPr
 
     req.once("response", (res) => {
       cleanup();
-      resolve(wrapResponse(res, parsed.toString(), method));
+      resolve(wrapResponse(res, parsed.toString(), method, timeoutMs));
     });
     req.once("error", (error) => {
       cleanup();

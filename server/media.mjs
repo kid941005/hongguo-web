@@ -38,6 +38,12 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
     throw fail(error && error.code === "TIMEOUT" ? "TIMEOUT" : "UPSTREAM", "媒体上游请求失败");
   }
 
+  // 上游 4xx/5xx（416 除外）不是可透传的媒体内容，直接按代理失败处理，避免浏览器把错误页当视频。
+  if (!upstream.ok && upstream.status !== 416) {
+    try { upstream.discard(); } catch {}
+    throw fail("UPSTREAM", "媒体上游返回 HTTP " + upstream.status);
+  }
+
   const out = {};
   for (const key of ["content-type", "content-length", "accept-ranges", "content-range", "etag", "last-modified"]) {
     const value = upstream.headers.get(key);
@@ -50,8 +56,18 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
   if (req.method === "HEAD" || !upstream.body) return res.end();
 
   const body = Readable.fromWeb(upstream.body);
-  body.on("error", () => res.destroy());
-  res.on("close", () => body.destroy());
+  // 上游只回了响应头却不再吐数据时，20 秒空闲就断开，别让连接与播放槽位永久挂住。
+  let idleTimer = null;
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => body.destroy(new Error("媒体上游读取超时")), 20000);
+    if (idleTimer.unref) idleTimer.unref();
+  };
+  armIdle();
+  body.on("data", armIdle);
+  body.on("end", () => { if (idleTimer) clearTimeout(idleTimer); });
+  body.on("error", () => { if (idleTimer) clearTimeout(idleTimer); res.destroy(); });
+  res.on("close", () => { if (idleTimer) clearTimeout(idleTimer); body.destroy(); });
   body.pipe(res);
 }
 

@@ -127,23 +127,23 @@ function createBuiltinSearch(provider) {
     // 同一时刻只跑一份刷新，避免多条搜索同时触发重复抓取。
     if (refreshing) return refreshing;
     refreshing = (async () => {
-    const items = [];
-    const seen = new Set();
-    for (let start = 1; start <= POOL_PAGES; start += BATCH) {
-      const pages = [];
-      for (let page = start; page < start + BATCH && page <= POOL_PAGES; page++) pages.push(page);
-      const batches = await Promise.all(
-        pages.map((page) => provider.home(page).then((r) => toItems(r.items)).catch(() => [])),
-      );
-      for (const batch of batches) {
-        for (const item of batch) {
-          if (!seen.has(item.id)) {
-            seen.add(item.id);
-            items.push(item);
+      const items = [];
+      const seen = new Set();
+      for (let start = 1; start <= POOL_PAGES; start += BATCH) {
+        const pages = [];
+        for (let page = start; page < start + BATCH && page <= POOL_PAGES; page++) pages.push(page);
+        const batches = await Promise.all(
+          pages.map((page) => provider.home(page).then((r) => toItems(r.items)).catch(() => [])),
+        );
+        for (const batch of batches) {
+          for (const item of batch) {
+            if (!seen.has(item.id)) {
+              seen.add(item.id);
+              items.push(item);
+            }
           }
         }
       }
-    }
       if (items.length) cache = { time: Date.now(), items };
       return cache;
     })().finally(() => { refreshing = null; });
@@ -291,7 +291,10 @@ export function createCatalog({ provider, sources }) {
     const entry = entryOf(sourceId);
     if (entry.type === "builtin") {
       const data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");
-      const episodes = (data.episodes || []).map((ep) => ({ id: String(ep.id), name: ep.title }));
+      const episodes = (data.episodes || []).map((ep, index) => ({
+        id: String(ep.id),
+        name: ep.title || "第 " + (index + 1) + " 集",
+      }));
       return {
         source: entry.id,
         id: String(id),

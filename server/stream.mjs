@@ -50,12 +50,16 @@ export function createStreamHandler({ provider, limit = 6 }) {
       if (req.headers.range) headers["content-range"] = "bytes " + start + "-" + end + "/" + stream.total;
 
       // 先取首块：解密失败时还能回错误码，而不是发出半截响应
-      const first = req.method === "HEAD" ? null : await stream.chunk(start, Math.min(start + CHUNK - 1, end));
+      const first = req.method === "HEAD"
+        ? null
+        : await withTimeout(stream.chunk(start, Math.min(start + CHUNK - 1, end)), 20000, "视频分块读取超时");
       res.writeHead(req.headers.range ? 206 : 200, headers);
       if (req.method === "HEAD") return res.end();
 
       for (let offset = start; offset <= end && !res.destroyed; offset += CHUNK) {
-        const chunk = offset === start ? first : await stream.chunk(offset, Math.min(offset + CHUNK - 1, end));
+        const chunk = offset === start
+          ? first
+          : await withTimeout(stream.chunk(offset, Math.min(offset + CHUNK - 1, end)), 20000, "视频分块读取超时");
         if (res.destroyed) break;
         if (!res.write(chunk)) {
           await new Promise((resolve) => {

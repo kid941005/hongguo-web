@@ -7,6 +7,7 @@ const sourceFile = String((workerData && workerData.file) || "source.js");
 
 let activeContext = null;
 let nextFetchId = 1;
+let runtimeReady = false;
 const pendingFetches = new Map();
 
 function send(message) {
@@ -226,7 +227,12 @@ function createBridge(deps) {
     }
     let body = options.body;
     if (body && typeof body === "object" && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
-      try { body = JSON.stringify(body); } catch { body = String(body); }
+      // URLSearchParams 必须序列化成 query string，否则 JSON.stringify 会得到 "{}"。
+      if (typeof body.append === "function" && typeof body.get === "function" && typeof body.toString === "function") {
+        body = body.toString();
+      } else {
+        try { body = JSON.stringify(body); } catch { body = String(body); }
+      }
     }
     const payload = {
       url: rawUrl,
@@ -406,6 +412,7 @@ function boot() {
     return;
   }
   if (!hasInit) {
+    runtimeReady = true;
     send({ type: "ready" });
     return;
   }
@@ -413,7 +420,7 @@ function boot() {
   try { pending = vm.runInContext("__invoke('init', [])", activeContext, { timeout: 5000 }); }
   catch (error) { send({ type: "load-error", error: serializeError(error) }); return; }
   Promise.resolve(pending).then(
-    function () { send({ type: "ready" }); },
+    function () { runtimeReady = true; send({ type: "ready" }); },
     function (error) { send({ type: "load-error", error: serializeError(error) }); },
   );
 }
@@ -422,7 +429,8 @@ process.on("unhandledRejection", function (reason) {
   sendLog("未处理的 Promise 拒绝: " + String((reason && reason.message) || reason));
 });
 process.on("uncaughtException", function (error) {
-  send({ type: "load-error", error: serializeError(error) });
+  if (runtimeReady) send({ type: "crash", error: serializeError(error) });
+  else send({ type: "load-error", error: serializeError(error) });
 });
 
 boot();

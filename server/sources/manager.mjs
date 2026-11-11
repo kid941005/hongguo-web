@@ -157,20 +157,9 @@ export class SourceManager {
           hasCategories: true,
           updateUrl: meta.updateUrl || "",
         };
-        const existing = registry.get(meta.id);
-        if (existing) {
-          if (!existing.builtin || builtin) continue;
-          // 内置源的同 id 用户文件视为上游更新覆盖，仍保留内置属性。
-          registry.set(meta.id, {
-            ...existing,
-            name: entry.name || existing.name,
-            version: entry.version || existing.version,
-            file,
-            override: true,
-            updateUrl: entry.updateUrl || existing.updateUrl || "",
-          });
-          continue;
-        }
+        // 内置源优先：同 id 的用户文件会被忽略（install 也不允许覆盖内置），
+        // 否则 registry 会保留 type="builtin" 却指向用户文件，形成永远走不到的死分支。
+        if (registry.has(meta.id)) continue;
         registry.set(meta.id, entry);
       }
     };

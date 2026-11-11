@@ -282,6 +282,8 @@ const CACHE_TTL = 300000;
 const CACHE_MAX = 100;
 setInterval(() => {
   for (const cache of [api.streamCache, api.videoInfoCache, api.pageCache, api.appSearchCache]) {
+    // 上游实现变更时某个缓存可能不存在或不是 Map：跳过而不是让定时器抛异常拖垮进程。
+    if (!(cache instanceof Map)) continue;
     for (const [key, value] of cache) {
       const time = value && typeof value.time === "number" ? value.time : 0;
       if (Date.now() - time > CACHE_TTL) cache.delete(key);

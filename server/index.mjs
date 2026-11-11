@@ -69,6 +69,17 @@ process.on("unhandledRejection", (reason) => {
   console.error(JSON.stringify({ event: "unhandled_rejection", message: String((reason && reason.message) || reason) }));
 });
 
+// 兜底：定时器/缓存清理等异步路径抛出的未捕获异常不应让进程静默退出；
+// 记录后走受控关闭流程，避免在状态不确定时继续服务（Docker 会自动拉起）。
+process.on("uncaughtException", (error) => {
+  console.error(JSON.stringify({
+    event: "uncaught_exception",
+    message: String((error && error.message) || error),
+    stack: String((error && error.stack) || "").slice(0, 2000),
+  }));
+  try { shutdown("uncaught_exception"); } catch { process.exit(1); }
+});
+
 let closing = false;
 function shutdown(signal) {
   if (closing) return;

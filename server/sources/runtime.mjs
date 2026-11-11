@@ -56,7 +56,14 @@ async function performFetch(payload) {
     allowPrivate: PRIVATE_FETCH_ALLOWED,
     message: "源脚本不允许访问内网地址（如确需内网，设置 ALLOW_PRIVATE_FETCH=1）",
   });
+  const MAX_FETCH_BYTES = 32 * 1024 * 1024;
+  const declared = Number(response.headers.get("content-length") || 0);
+  if (declared > MAX_FETCH_BYTES) {
+    try { response.discard(); } catch {}
+    throw fail("TOO_BIG", "源脚本请求的响应超过 32MB 上限");
+  }
   const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > MAX_FETCH_BYTES) throw fail("TOO_BIG", "源脚本请求的响应超过 32MB 上限");
   const headers = {};
   response.headers.forEach((value, key) => { headers[key] = value; });
   return {
@@ -144,6 +151,21 @@ export class SourceRuntime {
         if (message.type === "ready") { finish(); return; }
         if (message.type === "load-error") {
           finish(fail("SOURCE_LOAD", "源脚本执行失败: " + ((message.error && message.error.message) || "未知错误")));
+          return;
+        }
+        if (message.type === "crash") {
+          const failure = fail("SOURCE_CRASH", "源进程运行期异常: " + ((message.error && message.error.message) || "未知错误"));
+          if (!settled) {
+            finish(failure);
+            return;
+          }
+          if (this.worker === worker) {
+            this.worker = null;
+            this.readyState = "dead";
+          }
+          this.failPending(failure);
+          // 运行期异常后该 isolate 状态不可信，直接回收，避免留下半死进程。
+          try { const pending = worker.terminate(); if (pending && typeof pending.catch === "function") pending.catch(() => {}); } catch {}
           return;
         }
         if (message.type === "fetch") { this.handleFetch(message); return; }
@@ -245,8 +267,11 @@ export class SourceRuntime {
         this.pendingCalls.delete(id);
         this.pushLog("[" + method + "] 超时 " + (Date.now() - started) + "ms");
         const error = fail("TIMEOUT", "源响应超时: " + method);
-        this.terminateWorker();
-        this.failPending(error);
+        // 只有最后一个在途调用超时才回收 worker；否则仅结束当前请求，避免误伤并发调用。
+        if (this.pendingCalls.size === 0) {
+          this.terminateWorker();
+          this.failPending(error);
+        }
         reject(error);
       }, timeoutMs);
       this.pendingCalls.set(id, { resolve: resolve, reject: reject, timer: timer, method: method, started: started });

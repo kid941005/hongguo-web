@@ -55,7 +55,11 @@ export class UserStore {
   login(username, pw) {
     const name = String(username || "").trim();
     const row = this.db.prepare("SELECT id, username, phash, salt FROM users WHERE username = ?").get(name);
-    if (!row) throw fail("UNAUTHORIZED", "用户名或密码错误");
+    if (!row) {
+      // 用户不存在时也做一次等价开销的哈希，避免通过响应时间枚举用户名。
+      hashPassword(String(pw || ""), "0".repeat(32));
+      throw fail("UNAUTHORIZED", "用户名或密码错误");
+    }
     if (!safeEqualHex(row.phash, hashPassword(String(pw || ""), row.salt)))
       throw fail("UNAUTHORIZED", "用户名或密码错误");
     const user = { id: Number(row.id), username: row.username };
@@ -94,7 +98,7 @@ export class UserStore {
   listHistory(userId, limit = 100) {
     const rows = this.db
       .prepare("SELECT * FROM history WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?")
-      .all(userId, Math.min(200, Math.max(1, limit)));
+      .all(userId, Math.min(200, Math.max(1, Math.floor(Number(limit) || 100))));
     return rows.map((r) => ({
       source: r.source, id: r.vod_id, title: r.title, cover: r.cover,
       lineIdx: r.line_idx, lineName: r.line_name, epIdx: r.ep_idx, epName: r.ep_name,
@@ -106,7 +110,8 @@ export class UserStore {
     const source = str(item.source, 64);
     const vodId = str(item.id, 128);
     if (!vodId) throw fail("BAD_INPUT", "缺少剧集 id");
-    const at = Math.max(0, Math.floor(num(item.at, Date.now()))) || Date.now();
+    // 允许客户端上报的 at 略早于服务端，但不接受未来时间，避免提前占位。
+    const at = Math.min(Date.now() + 5 * 60 * 1000, Math.max(0, Math.floor(num(item.at, Date.now()))) || Date.now());
     const lineIdx = Math.max(0, Math.floor(num(item.lineIdx)));
     const epIdx = Math.max(0, Math.floor(num(item.epIdx)));
     const pos = Math.max(0, num(item.pos));

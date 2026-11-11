@@ -156,7 +156,7 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
     // ---- 我的数据：观看历史（跨设备同步） ----
     ["GET", /^\/api\/me\/history$/, (ctx) => {
       const u = requireUser(ctx);
-      const limit = Math.min(200, Math.max(1, Number(ctx.q.get("limit") || 100) || 100));
+      const limit = Math.min(200, Math.max(1, Math.floor(Number(ctx.q.get("limit") || 100) || 100)));
       return ctx.json(200, { items: users.listHistory(u.id, limit) });
     }],
     ["PUT", /^\/api\/me\/history$/, async (ctx) => {
@@ -272,7 +272,11 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
       const tid = (q.get("tid") || "").trim();
       if (!tid) throw fail("BAD_INPUT", "缺少分类参数");
       let extend = {};
-      if (q.get("extend")) extend = parseJsonBody(q.get("extend"));
+      const rawExtend = q.get("extend");
+      if (rawExtend) {
+        if (rawExtend.length > 2000) throw fail("BAD_INPUT", "分类筛选参数过长");
+        extend = parseJsonBody(rawExtend);
+      }
       return json(200, await catalog.category(q.get("source") || undefined, tid, pageOf(q), extend));
     }],
     ["GET", /^\/api\/search$/, async ({ json, q }) => {
