@@ -370,6 +370,8 @@ export function createServer({ provider, sources, catalog, users = null, monitor
     if (pathMatched) throw fail("BAD_METHOD", "Method not allowed");
     if (url.pathname.startsWith("/api/")) throw fail("NOT_FOUND", "接口不存在");
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "Method not allowed");
+    // 浏览器即使页面已声明 data: 图标仍会固定请求 /favicon.ico，这里用 PWA 图标兜底，避免每次刷新多一条 404。
+    if (url.pathname === "/favicon.ico") return serveStatic(req, res, "/icons/icon-192.png");
     return serveStatic(req, res, url.pathname);
   }
 

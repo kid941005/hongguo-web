@@ -217,9 +217,23 @@ export const provider = {
       throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用，正在自动恢复，请切换数据源或稍后重试");
     }
     if (track) METRICS.attempts += 1;
-    try {
+    // 上游 CDN 偶发 DNS/TLS 抖动（getaddrinfo EAI_AGAIN、socket hang up 等），
+    // 这类错误跟身份/风控无关，立刻重试一次就能救回来，没必要把 502 抛给播放器。
+    const resolve = async () => {
       const stream = await api.resolveStream(id, "auto");
       const prepared = await api.prepareHeader(stream);
+      return { stream, prepared };
+    };
+    try {
+      let resolved;
+      try {
+        resolved = await resolve();
+      } catch (error) {
+        if (!isTransientNetworkError(error)) throw error;
+        METRICS.retries += 1;
+        resolved = await resolve();
+      }
+      const { stream, prepared } = resolved;
       if (track) {
         STREAM_BREAKER.fails = 0;
         STREAM_BREAKER.openUntil = 0;
@@ -260,6 +274,7 @@ export const provider = {
         attempts: METRICS.attempts,
         failures: METRICS.failures,
         empty: METRICS.empty,
+        retries: METRICS.retries,
         lastError: METRICS.lastError,
         lastErrorAt: METRICS.lastErrorAt,
       },
@@ -275,11 +290,20 @@ export const provider = {
   },
 };
 
+// 上游 CDN 侧的瞬时网络故障：DNS 抖动、连接被断、连接重置、读超时。
+// 与「200 空正文」这类身份/风控问题区分开，前者可以立刻重试，后者重试也没用。
+const TRANSIENT_NETWORK = /EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|socket hang up|TLS|Client network socket|getaddrinfo|网络|超时/i;
+
+function isTransientNetworkError(error) {
+  const text = String((error && (error.code ? error.code + " " : "") + ((error && error.message) || error)));
+  return TRANSIENT_NETWORK.test(text);
+}
+
 // Limit the pinned upstream's otherwise unbounded caches during long-lived home use.
 const STREAM_BREAKER_THRESHOLD = 3;
 const STREAM_BREAKER_COOLDOWN = 45000;
 const STREAM_BREAKER = { fails: 0, openUntil: 0, lastError: "" };
-const METRICS = { attempts: 0, failures: 0, empty: 0, lastError: "", lastErrorAt: 0 };
+const METRICS = { attempts: 0, failures: 0, empty: 0, retries: 0, lastError: "", lastErrorAt: 0 };
 
 const CACHE_TTL = 300000;
 const CACHE_MAX = 100;

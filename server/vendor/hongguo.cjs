@@ -198,7 +198,23 @@ function findRankPayload(value, depth = 0) {
     return null;
 }
 
+// 榜单数据在 2026-11 前后从 data-fn-args 属性搬到了 SSR 的 window._ROUTER_DATA
+// （loaderData['rank_xxx/page'].content.rankList），两个位置都试，谁有数据用谁。
+function unwrapRankPayload(value) {
+    const found = findRankPayload(value);
+    if (!found) return null;
+    const inner = found.content;
+    if (inner && Array.isArray(inner.rankList)) return inner;
+    return found;
+}
+
 function rankData(html) {
+    try {
+        const payload = unwrapRankPayload(extractAssignedJson(html));
+        if (payload) return payload;
+    } catch (error) {
+        // 没有 _ROUTER_DATA 时继续走老路径
+    }
     const re = /data-fn-args=(?:"([^"]+)"|'([^']+)')/g;
     let match;
     while ((match = re.exec(html))) {
@@ -209,7 +225,7 @@ function rankData(html) {
         } catch (error) {
             continue;
         }
-        const payload = findRankPayload(parsed);
+        const payload = unwrapRankPayload(parsed);
         if (payload) return payload;
     }
     throw new Error('榜单页面没有数据');

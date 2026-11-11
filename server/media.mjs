@@ -18,11 +18,24 @@ function upstreamHeaders(referer, extra) {
   return headers;
 }
 
+// 浏览器习惯用开放式 Range（bytes=0-）要整段，但部分上游 CDN（如西饭的 dj.youlishipin.com）
+// 对无上界的 Range 会直接挂起不响应，客户端等到超时变 502。这里统一归一化成有界块，
+// 浏览器拿到 content-range 后会自然续发下一段，行为与整段响应一致。
+const RANGE_CHUNK = 2 * 1024 * 1024;
+
+function boundRange(value) {
+  const m = /^bytes=(\d+)-(\d*)$/.exec(String(value || "").trim());
+  if (!m || m[2]) return value;
+  const start = Number(m[1]);
+  if (!Number.isSafeInteger(start)) return value;
+  return "bytes=" + start + "-" + (start + RANGE_CHUNK - 1);
+}
+
 // 透传 Range 的视频代理：浏览器只连本站，避免 CORS 与防盗链。
 export async function proxyMedia(req, res, { url, referer, ua }) {
   const userAgent = cleanUa(ua);
   const headers = upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null);
-  if (req.headers.range) headers.range = req.headers.range;
+  if (req.headers.range) headers.range = boundRange(req.headers.range);
 
   let upstream;
   try {

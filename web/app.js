@@ -48,14 +48,25 @@
     var url = path + (qs ? ('?' + qs) : '');
     var opts = options || {};
     opts.headers = headers(opts.headers);
-    return fetch(url, opts).then(function (r) {
-      return r.text().then(function (text) {
-        var body = {};
-        if (text) { try { body = JSON.parse(text); } catch (e) { body = { error: text.slice(0, 200) }; } }
-        if (!r.ok) { var err = new Error(body && body.error || ('HTTP ' + r.status)); err.code = body && body.code; throw err; }
-        return body;
+    // 切源/冷启动时上游偶发 502/504，直接让首页空白太伤体验：GET 失败自动重试一次。
+    var canRetry = !opts.method || opts.method === 'GET';
+    function attempt(left) {
+      return fetch(url, opts).then(function (r) {
+        return r.text().then(function (text) {
+          var body = {};
+          if (text) { try { body = JSON.parse(text); } catch (e) { body = { error: text.slice(0, 200) }; } }
+          if (!r.ok) {
+            if (left > 0 && canRetry && (r.status === 502 || r.status === 504)) return attempt(left - 1);
+            var err = new Error(body && body.error || ('HTTP ' + r.status)); err.code = body && body.code; throw err;
+          }
+          return body;
+        });
+      }, function (e) {
+        if (left > 0 && canRetry) return attempt(left - 1);
+        throw e;
       });
-    });
+    }
+    return attempt(1);
   }
   function api(path, params) { return request(path, params); }
   function postJson(path, body) {
@@ -1148,7 +1159,8 @@
         return;
       }
       var msg = '播放失败：' + (err.message || '未知错误');
-      toast(msg); showPlayerError(msg + '。可尝试换源或重试。');
+      // 浏览器给的 message 常以 "." 结尾，别再补一个句号，否则会拼出「…was found.。可尝试换源」
+      toast(msg); showPlayerError(msg + (/[。.!！?？]$/.test(msg) ? '' : '。') + '可尝试换源或重试。');
     });
   }
 
@@ -1293,7 +1305,8 @@
     postJson('/api/sources/import', { url: url || undefined, code: url ? undefined : code }).then(function (res) {
       $('impMsg').textContent = '导入成功：' + res.source.name + '（v' + res.source.version + '）';
       toast('已导入源：' + res.source.name);
-      loadSources().then(function () { state.source = res.source.id; $('sourceSelect').value = state.source; loadHome(); });
+      // 导入后面板里也要立刻出现新源，否则用户得关掉重开才看得到（下拉/首页已更新的状态会对不上）。
+      loadSources().then(function () { state.source = res.source.id; $('sourceSelect').value = state.source; refreshManage(); loadHome(); });
       setTimeout(closeImport, 700);
     }).catch(function (e) {
       $('impMsg').className = 'impmsg err';
