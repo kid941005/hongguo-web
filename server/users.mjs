@@ -108,6 +108,23 @@ export class UserStore {
     }));
   }
 
+  // 推荐用：按用户聚合全部观看记录（只读，仅用于协同过滤打分；不对外暴露原始数据）。
+  allHistory(maxUsers = 400) {
+    const rows = this.db
+      .prepare("SELECT user_id, source, vod_id, title, cover, updated_at FROM history ORDER BY updated_at DESC")
+      .all();
+    const byUser = new Map();
+    for (const row of rows) {
+      const uid = Number(row.user_id);
+      if (!byUser.has(uid)) {
+        if (byUser.size >= maxUsers) continue;
+        byUser.set(uid, []);
+      }
+      byUser.get(uid).push({ source: row.source, id: row.vod_id, title: row.title, cover: row.cover, at: row.updated_at });
+    }
+    return [...byUser.entries()].map(([userId, items]) => ({ userId, items }));
+  }
+
   putHistory(userId, item) {
     const source = str(item.source, 64);
     const vodId = str(item.id, 128);

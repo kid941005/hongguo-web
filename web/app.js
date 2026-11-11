@@ -490,7 +490,14 @@
     var r = document.createElement('div'); r.className = 'crem'; r.textContent = item.remarks || '';
     body.appendChild(t); body.appendChild(r);
     var ct = document.createElement('div'); ct.className = 'ctags';
-    if (renderTagEls(ct, item.tags, 'ctag', 3)) body.appendChild(ct);
+    var tagCount = renderTagEls(ct, item.tags, 'ctag', item.reason ? 2 : 3);
+    if (item.reason) {
+      var reasonEl = document.createElement('span');
+      reasonEl.className = 'ctag reason';
+      reasonEl.textContent = item.reason;
+      ct.appendChild(reasonEl); ct.classList.remove('hidden'); tagCount += 1;
+    }
+    if (tagCount) body.appendChild(ct);
     card.appendChild(img); card.appendChild(body);
     card.addEventListener('click', function () { openDetail(item.id, item.source || ''); });
     return card;
@@ -625,9 +632,40 @@
     }).catch(function (e) { state.loadingMore = false; setAutoMore(false); showError(e); });
   }
 
+  // ---- 猜你喜欢（基于观看历史：协同过滤 + 相似内容 + 热门兜底） ----
+  function forYouNote(r) {
+    var b = (r && r.basis) || {};
+    var head = '✨ 猜你喜欢：';
+    if (b.mode === 'collab') return head + '根据你的 ' + b.seeds + ' 部观看记录，找到 ' + b.coUsers + ' 位看剧口味相近的用户，推荐他们也在追的剧。';
+    if (b.mode === 'similar') return head + '根据你的 ' + b.seeds + ' 部观看记录推荐相似题材（暂无可参考的共同观看数据）。';
+    if (b.seeds) return head + '根据你的 ' + b.seeds + ' 部观看记录暂时没找到相近的剧，先补一些热门；多看几部后推荐会更准。';
+    return head + '还没有观看记录，先给你热门榜单；看几部之后这里会变成专属推荐。';
+  }
+  function loadForYou(refresh) {
+    setView('home'); setNav('foryou'); showNotice('');
+    state.aggregate = false; state.aggGroups = [];
+    state.mode = 'foryou'; state.tid = ''; state.q = ''; state.page = 1; state.classes = [];
+    state.hasMore = false;
+    $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
+    $('empty').textContent = '正在为你挑选…'; $('empty').classList.remove('hidden');
+    setAutoMore(false); state.loadingMore = true;
+    // 未登录时把本地观看历史作为种子；登录后服务端以账号历史为准（跨设备同一份结果）。
+    var seeds = histLoad().slice(0, 8).map(function (e) {
+      return { source: e.source, id: e.id, title: e.title, cover: e.cover };
+    });
+    return postJson('/api/for-you', { seeds: seeds, refresh: refresh === true }).then(function (r) {
+      state.loadingMore = false;
+      state.items = r.items || [];
+      renderItems(state.items, false);
+      showNotice(forYouNote(r));
+      if (!state.items.length) { $('empty').textContent = '暂时没有可推荐的剧，先去首页看看吧'; $('empty').classList.remove('hidden'); }
+    }).catch(function (e) { state.loadingMore = false; showError(e); });
+  }
+
   function setNav(id) {
     $('btnHome').classList.toggle('active', id === 'home');
     $('btnRecommend').classList.toggle('active', id === 'recommend');
+    $('btnForYou').classList.toggle('active', id === 'foryou');
   }
 
   function setAutoMore(show) {
@@ -1504,6 +1542,7 @@
   $('btnMore').addEventListener('click', loadMore);
   $('btnHome').addEventListener('click', function () { loadHome(); });
   $('btnRecommend').addEventListener('click', function () { loadRecommend(); });
+  $('btnForYou').addEventListener('click', function () { loadForYou(); });
   window.addEventListener('scroll', maybeAutoMore, { passive: true });
   // 底部哨兵：若滚动事件在容器/内嵌场景不触发，IntersectionObserver 仍能兜住自动加载
   if ('IntersectionObserver' in window) {
@@ -1573,7 +1612,7 @@
   window.__hg = {
     state: state, openPlayer: openPlayer, cycleQuality: cycleQuality,
     cycleRate: cycleRate, toggleFullscreen: toggleFullscreen, histLoad: histLoad,
-    loadRecommend: loadRecommend, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
+    loadRecommend: loadRecommend, loadForYou: loadForYou, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
     openAuth: openAuth, logout: logout, refreshMe: refreshMe, checkUpdates: checkUpdates,
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
     mergeServerHistory: mergeServerHistory
@@ -1583,6 +1622,7 @@
   function bootFromQuery() {
     var sp = new URLSearchParams(location.search);
     if (sp.get('rec') === '1') { loadRecommend(); return true; }
+    if (sp.get('foryou') === '1') { loadForYou(); return true; }
     var src = sp.get('source') || '';
     if (src) {
       var sel = $('sourceSelect');

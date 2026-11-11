@@ -45,6 +45,21 @@ await check("home", async () => {
   return body.items.length + " 条";
 });
 
+await check("for-you", async () => {
+  const res = await fetch(BASE + "/api/for-you", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ seeds: [] }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error("HTTP " + res.status + " " + text.slice(0, 200));
+  const body = JSON.parse(text);
+  if (!Array.isArray(body.items) || !body.items.length) throw new Error("推荐结果为空");
+  const mode = body.basis && body.basis.mode;
+  if (!["collab", "similar", "popular"].includes(mode)) throw new Error("basis.mode 异常: " + mode);
+  return body.items.length + " 条，mode=" + mode;
+});
+
 await check("source-health", async () => {
   if (!active) throw new Error("未确定 active 源");
   let lastError = "";

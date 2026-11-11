@@ -95,7 +95,7 @@ function rateLimit(req) {
   }
 }
 
-export function createServer({ provider, sources, catalog, users = null, monitor = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
+export function createServer({ provider, sources, catalog, users = null, monitor = null, recommend = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
   const serveStatic = createStaticHandler(webDir);
   const serveStream = createStreamHandler({ provider, limit: maxStreams });
 
@@ -243,6 +243,14 @@ export function createServer({ provider, sources, catalog, users = null, monitor
       const u = requireUser(ctx);
       const body = parseJsonBody(await readBody(ctx.req));
       return ctx.json(200, { ok: true, prefs: users.setPrefs(u.id, body) });
+    }],
+
+    // ---- 猜你喜欢（基于观看历史的推荐；登录用服务端历史，未登录用本地历史兜底） ----
+    ["POST", /^\/api\/for-you$/, async (ctx) => {
+      if (!recommend) throw fail("NOT_FOUND", "推荐服务未启用");
+      const body = parseJsonBody(await readBody(ctx.req));
+      const user = currentUser(ctx);
+      return ctx.json(200, await recommend.forYou({ user, seeds: body.seeds }));
     }],
 
     // ---- 源管理 ----

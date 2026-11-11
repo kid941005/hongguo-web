@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.7.5","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.8.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑四项冒烟（health / 源列表 / 首页 / 源自检）。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.7.5
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.8.0
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -149,6 +149,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **源管理**：点顶栏「源」分组里的「⚙ 管理」打开面板，可看每个源的版本/类型/是否使用中，一键启用、点「自检」做连通性检查（默认校验首页/详情，按住 Shift 点击会对内置红果真实取流校验首块是否为 ftyp，较慢）、展开最近运行日志、删除导入源（内置源不可删）。有上游地址的源会显示「自动更新」开关，面板底部「检查源更新」可立即检查全部源；更新失败只记录错误并保留旧版本。
 - **导入源**：点顶栏「源」分组里的「＋ 新增」，粘贴源文件 URL 或直接粘贴 JS 源码。导入后即时出现在下拉框里。按 URL 导入的源会记住地址并默认自动更新（仅 HTTPS）；直接粘贴源码的源若 meta 里带 `updateUrl` 也会自动更新。
 - **推荐页**：顶栏「🔥 推荐」，把内置红果四个榜单（热播 / 真人 / 漫剧 / AI）按真实评分合并排序，卡片右上角显示「★ 9.5」评分，可一直向下浏览。
+- **猜你喜欢**：顶栏「✨ 猜你喜欢」，基于观看历史做推荐，三路信号合并排序（①协同过滤：看过同一部剧的其他用户还看了什么；②相似题材：与你看过的剧标题相近的在架内容；③热门兜底）。结果按稳定键排序并缓存 2 分钟，**同一账号在任何设备上看到相同结果**；不同账号互相隔离。未登录时用本机历史作为种子（只看本机数据，不上传）；没有任何历史时先给热门榜单。卡片左上角徽标标明「同好也在看 / 相似内容 / 热门」，顶部提示条说明本次依据。
 - **无限滚动**：首页、分类、搜索结果和推荐页滑到底部会自动加载下一页；「加载更多」按钮仍保留作为兜底（自动加载不可用时手动点）。
 - **搜索**：输入关键词回车。红果内置源的官方搜索接口被风控，会自动降级为「首页推荐池检索」（结果偏少，界面会提示）；JS 源走各自搜索接口，完整可用。
 - **播放**：点卡片 → 详情页选集。多线路时先选线路。播放器支持 HLS（m3u8，含多码率清晰度切换）与 MP4 直链；FLV 没有对应播放器，源里返回 flv 会播不了。- **播放失败自动找替代源**：播放报错时播放器错误条会多出一个按钮「换到「<源>」看第 N 集」——后端拿当前剧名到其它源搜索、按标题相似度（≥0.62）匹配并校验集数覆盖，取最像的前 3 个候选；点一下即切到那个源的同名剧、并直接定位到同一集继续看。找不到同名剧时按钮不出现（红果独播剧在别家通常没有）。
@@ -159,7 +160,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **多设备同步**：历史、收藏、追更都存在服务端 SQLite（`DATA_DIR/hongguo.db`）。本地历史与服务端按时间戳取新合并，旧进度不会覆盖新进度。
 - **PWA（装到桌面/手机主屏）**：Chrome/Edge 地址栏右侧会出现「安装」；手机浏览器「添加到主屏幕」后以独立窗口运行。Service Worker 需要安全上下文（`http://localhost` 或 HTTPS），用局域网 IP 的纯 HTTP 打开时页面可用但没有离线缓存、不能安装。
 - **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，控制条实时显示当前倍速；刷新页面、换集都会保持，点开新剧默认 1.0×）。未登录时记在本机，登录后随账号**跨设备同步**（服务端 SQLite），不同账号各存各的；清空浏览器缓存后回到 1.0×。清晰度切换（仅 HLS 多码率源出现，单码率自动隐藏）、全屏（按钮 / 双击画面 / F 键）。
-- **深链**：`/?rec=1`（直接打开推荐页）、`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
+- **深链**：`/?rec=1`（直接打开推荐页）、`/?foryou=1`（直接打开猜你喜欢）、`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
 
 ## 3.1 前端存储
 
@@ -286,6 +287,7 @@ var spider = {
 | POST | `/api/sources/:id/auto-update` | 开关单个源自动更新：`{ "enabled": true }` |
 | GET | `/api/home?source=&page=` | 首页（`classes` + `items`） |
 | GET | `/api/recommend?page=` | 推荐页：内置红果四榜单按真实评分合并排序（`items[].score/heat/bang`） |
+| POST | `/api/for-you` | 猜你喜欢：`{ seeds?: [{source,id,title,cover}], refresh?: bool }`；登录用户用云端历史做种子（忽略 seeds），未登录用传入 seeds。返回 `{items:[{id,source,title,cover,remarks,tags,sourceName,reason,score}], basis:{mode,seeds,coUsers,total,counts}, generatedAt}` |
 | GET | `/api/category?source=&tid=&page=` | 分类列表 |
 | GET | `/api/search?source=&q=&page=` | 搜索；`source=__all`（或 `all=1`）为多源聚合，返回 `{aggregate:true, groups:[{source,name,count,ms,hasMore,error}]}` |
 | GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集） |

@@ -6,6 +6,7 @@ import { SourceManager } from "./sources/manager.mjs";
 import { createCatalog } from "./catalog.mjs";
 import { createServer } from "./http.mjs";
 import { createMonitor } from "./monitor.mjs";
+import { createRecommend } from "./recommend.mjs";
 import { openDb } from "./db.mjs";
 import { UserStore } from "./users.mjs";
 
@@ -51,12 +52,14 @@ const monitor = PLAYBACK_MONITOR
   : null;
 const db = openDb(DATA_DIR);
 const users = new UserStore(db);
+const recommend = createRecommend({ catalog, users, sources });
 const server = createServer({
   provider,
   sources,
   catalog,
   users,
   monitor,
+  recommend,
   webDir: path.join(ROOT, "web"),
   token: TOKEN,
   version,
