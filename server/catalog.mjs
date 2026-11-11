@@ -9,6 +9,11 @@ const TIMEOUT_AGGREGATE = 12000; // 聚合搜索单源上限：慢源不拖住�
 // 模板/示例源不参与聚合，避免「示例剧」和 example.com 404 污染结果。
 const AGGREGATE_SKIP = new Set(["template", "maccms"]);
 const RECOMMEND_PER_PAGE = 24;
+// 跨源降级：主源取不到流时按剧名去其它源找同一部剧（模板/示例源不参与）。
+const FALLBACK_SKIP = new Set(["template", "maccms"]);
+const FALLBACK_TIMEOUT = 12000;
+const FALLBACK_MAX = 3;
+const FALLBACK_MIN_SCORE = 0.62;
 
 function pick(...values) {
   for (const value of values) if (value !== undefined && value !== null && value !== "") return value;
@@ -53,6 +58,34 @@ function toItems(list) {
 function listOf(result) {
   if (Array.isArray(result)) return result;
   return result && Array.isArray(result.list) ? result.list : [];
+}
+
+// 标题归一：去掉空白/标点/「短剧」「全集」这类营销后缀，避免同一部剧在不同源写法不同而匹配不上。
+function titleKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s\u3000·・:：!！?？,，.。、\-—_~～|/\\()（）\[\]【】{}<>《》"'“”‘’#*+]/g, "")
+    .replace(/(短剧|全集|全\d+集|已完结|更新至\d+集?|第[一二三四五六七八九十百\d]+季)/g, "");
+}
+
+// 二元组 Dice 系数：中文短剧名多为 4–8 字，重合度比编辑距离更抗「多两个字/少一个字」的写法差异。
+function titleScore(a, b) {
+  const x = titleKey(a);
+  const y = titleKey(b);
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+  if (x.length >= 2 && y.length >= 2 && (x.includes(y) || y.includes(x))) return 0.9;
+  if (x.length < 2 || y.length < 2) return 0;
+  const grams = (text) => {
+    const set = new Set();
+    for (let i = 0; i < text.length - 1; i += 1) set.add(text.slice(i, i + 2));
+    return set;
+  };
+  const gx = grams(x);
+  const gy = grams(y);
+  let hit = 0;
+  for (const gram of gx) if (gy.has(gram)) hit += 1;
+  return (2 * hit) / (gx.size + gy.size);
 }
 
 // vod_play_url: 线路用 $$$ 分隔，集用 # 分隔，每集「集名$集ID」
@@ -374,6 +407,53 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
+  // 播放降级：主源取不到流时，用剧名到其它源找同一部剧，返回可直接跳转的候选（含对应集序号）。
+  // 只做检索与详情校验，不预先取流——换源是否可播由前端实际播放时判定。
+  async function playFallback(sourceId, { id, index } = {}) {
+    const entry = entryOf(sourceId);
+    const targetId = String(id || "").trim();
+    if (!targetId) throw fail("BAD_INPUT", "缺少剧 id");
+    const epIndex = Math.max(0, Math.floor(Number(index) || 0));
+    const base = await withTimeout(detail(entry.id, targetId), 30000, "详情加载超时");
+    const title = String(base.title || "").trim();
+    if (!title) throw fail("EMPTY", "无法确定剧名，不能自动换源");
+    const others = sources.list().sources.filter((item) => item.id !== entry.id && !FALLBACK_SKIP.has(item.id));
+    const found = await Promise.all(
+      others.map(async (item) => {
+        try {
+          const result = await withTimeout(search(item.id, title, 1), FALLBACK_TIMEOUT, "换源检索超时");
+          let best = null;
+          for (const candidate of result.items || []) {
+            const score = titleScore(candidate.title, title);
+            if (!best || score > best.score) best = { id: candidate.id, title: candidate.title, score };
+          }
+          if (!best || best.score < FALLBACK_MIN_SCORE) return null;
+          const data = await withTimeout(detail(item.id, best.id), FALLBACK_TIMEOUT, "换源详情超时");
+          const episodes = (data.lines && data.lines[0] && data.lines[0].episodes) || data.episodes || [];
+          if (!episodes.length) return null;
+          const target = Math.min(epIndex, episodes.length - 1);
+          return {
+            source: item.id,
+            name: item.name || item.id,
+            id: best.id,
+            title: data.title || best.title || title,
+            episodeCount: episodes.length,
+            targetIndex: target,
+            episodeName: String((episodes[target] && episodes[target].name) || ""),
+            score: Math.round(best.score * 1000) / 1000,
+          };
+        } catch {
+          return null; // 单个源失败只少一个候选，不影响整体降级
+        }
+      }),
+    );
+    const candidates = found
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score || b.episodeCount - a.episodeCount)
+      .slice(0, FALLBACK_MAX);
+    return { source: entry.id, id: targetId, title, epIndex, candidates };
+  }
+
   // 聚合搜索：并发问所有源（各取同一页），轮转交错合并，单源失败不影响整体。
   async function searchAll(keyword, page = 1) {
     const pageNo = Number(page) || 1;
@@ -523,5 +603,5 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
-  return { home, category, search, searchAll, recommend, detail, play, health, warmup };
+  return { home, category, search, searchAll, recommend, detail, play, playFallback, health, warmup };
 }

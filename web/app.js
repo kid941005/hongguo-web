@@ -10,6 +10,7 @@
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [],
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
+    fallback: null, fallbackLoading: false, health: null,
     user: null, favs: [], follows: []
   };
 
@@ -412,6 +413,25 @@
     var n = $('notice');
     if (!text) { n.classList.add('hidden'); n.textContent = ''; return; }
     n.textContent = text; n.classList.remove('hidden');
+  }
+
+  // ---- 播放通道健康横幅（/api/alerts）----
+  // 与 #notice 分开：聚合搜索的进度提示很频繁，混在一条里会互相覆盖。
+  function renderHealthBar(s) {
+    var el = $('healthBar'); if (!el) return;
+    state.health = s || null;
+    if (!s || !s.enabled || s.status === 'ok' || s.status === 'unknown') {
+      el.classList.add('hidden'); el.textContent = '';
+      return;
+    }
+    var txt = s.status === 'down'
+      ? '红果播放通道不可用：' + (s.reason || '上游异常') + '。可点播放器里的「换数据源」，或直接换一部剧。'
+      : '红果官网播放通道异常，已回落到备用通道' + (s.channel === 'app' ? '（画质可能降低）' : '') + '。';
+    el.textContent = txt;
+    el.classList.remove('hidden');
+  }
+  function loadHealth() {
+    return api('/api/alerts').then(renderHealthBar).catch(function () {});
   }
 
   function posterUrl(src) { return src || PLACEHOLDER; }
@@ -908,12 +928,44 @@
   function hidePlayerError() {
     clearPlayWatchdog();
     var box = $('playerError'); if (box) box.classList.add('hidden');
+    var fb = $('btnPlayerFallback'); if (fb) fb.classList.add('hidden');
+    state.fallback = null;
   }
   function showPlayerError(msg) {
     clearPlayWatchdog();
     var box = $('playerError'); if (!box) return;
     $('playerErrorText').textContent = msg || '播放失败，请重试或切换数据源。';
     box.classList.remove('hidden');
+    loadFallback(); // 顺手找同剧的其它源，播放失败时给一条能直接续上的路
+  }
+
+  // 播放降级：向后端要「同一部剧在其它源」的候选，直接跳到对应集继续看。
+  function loadFallback() {
+    var btn = $('btnPlayerFallback');
+    var d = state.detail;
+    if (!btn || !d || !d.id) return;
+    btn.classList.add('hidden');
+    state.fallback = null;
+    if (state.fallbackLoading) return;
+    state.fallbackLoading = true;
+    api('/api/play/fallback', { source: state.viewSource, id: d.id, index: state.epIdx || 0 })
+      .then(function (r) {
+        var list = (r && r.candidates) || [];
+        if (!list.length) return;
+        state.fallback = list[0];
+        btn.textContent = '换到「' + list[0].name + '」看第 ' + (list[0].targetIndex + 1) + ' 集';
+        btn.classList.remove('hidden');
+      })
+      .catch(function () { /* 降级检索失败不影响原有重试/换源按钮 */ })
+      .then(function () { state.fallbackLoading = false; });
+  }
+  function useFallback() {
+    var fb = state.fallback;
+    if (!fb) { toast('暂时没找到同剧的其它源'); return; }
+    closePlayer();
+    state.pendingPlay = fb.targetIndex;
+    toast('正在换到 ' + fb.name + ' 第 ' + (fb.targetIndex + 1) + ' 集…');
+    openDetail(fb.id, fb.source);
   }
   function armPlayWatchdog() {
     clearPlayWatchdog();
@@ -1426,6 +1478,7 @@
   $('btnClosePlayer').addEventListener('click', closePlayer);
   $('btnPlayerRetry').addEventListener('click', retryPlayback);
   $('btnPlayerSwitch').addEventListener('click', switchPlaybackSource);
+  $('btnPlayerFallback').addEventListener('click', useFallback);
   $('video').addEventListener('error', onVideoError);
   $('video').addEventListener('loadedmetadata', hidePlayerError);
   $('video').addEventListener('playing', hidePlayerError);
@@ -1512,7 +1565,8 @@
   }
 
   bindPlayerEvents();
-  loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion();
+  loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion(); loadHealth();
+  setInterval(loadHealth, 60 * 1000);
   // PWA：注册 service worker（仅 http(s) 下有效）
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
     var hadSwController = !!navigator.serviceWorker.controller;

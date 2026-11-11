@@ -960,6 +960,20 @@ function decryptPartial(data, start, key, prepared) {
 
 // ---------- 播放流解析与 Range 代理 ----------
 
+// 取流通道计数：web = 官网网页播放器通道（明文 mp4），app = App video_tab / multi_video_model 通道（CENC）。
+// 供 /api/metrics 与监控探针判断「主通道是否已失效、是否在靠回落通道续命」。
+const channelStats = {
+    web: { ok: 0, fail: 0, lastOkAt: 0, lastError: '', lastErrorAt: 0 },
+    app: { ok: 0, fail: 0, lastOkAt: 0, lastError: '', lastErrorAt: 0 },
+};
+
+function markChannel(name, ok, message) {
+    const bucket = channelStats[name];
+    if (!bucket) return;
+    if (ok) { bucket.ok += 1; bucket.lastOkAt = Date.now(); return; }
+    bucket.fail += 1; bucket.lastError = String(message || '').slice(0, 300); bucket.lastErrorAt = Date.now();
+}
+
 // 官网网页播放器通道：明文 mp4，无需 App 签名与设备注册，是最稳的一条取址路径。
 async function webPlayStream(vid) {
     const resp = await axios.post(WEB_PLAY_API, { item_id: str(vid) }, {
@@ -978,17 +992,25 @@ async function resolveStream(vid, quality) {
     const cacheKey = playKey(vid, quality); const cached = streamCache.get(cacheKey);
     if (cached && Date.now() - cached.time < 300000 && !(cached.value.expire && Date.now() / 1000 > cached.value.expire - 60)) return cached.value;
     let result = null; let webError = null;
-    try { result = await webPlayStream(vid); } catch (error) { webError = error; log('红果果web播放通道失败: ' + error.message); }
-    if (!result) {
-        const { model, info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
-        const selected = rows.find((row) => row.key === wanted || qualityNumber(row.quality) === qualityNumber(wanted)) || rows[0]; if (!selected) throw webError || new Error('没有可用清晰度');
-        const item = selected.item || {};
-        const rawUrl = cleanUrl(item.main_url || item.backup_url);
-        const seed = Buffer.from(str(model.key_seed || info.key_seed), 'base64');
-        let url = rawUrl;
-        if (seed.length && rawUrl) { try { url = decryptSpadeUrl(rawUrl, seed) || rawUrl; } catch { url = rawUrl; } }
-        const spade = item.spade_a || (item.encrypt_info && item.encrypt_info.spade_a);
-        result = { url, quality: qualityLabel(selected.quality || selected.key), codec: selected.codec === 'hevc' ? 'hevc' : 'h264', ua: PLAYBACK_UA, key: spade ? deriveContentKey(spade) : null };
+    try { result = await webPlayStream(vid); markChannel('web', true); } catch (error) { webError = error; markChannel('web', false, error.message); log('红果果web播放通道失败: ' + error.message); }
+    if (result) {
+        result.channel = 'web';
+    } else {
+        try {
+            const { model, info, rows } = await fetchVideoInfo(vid); const wanted = str(quality, 'auto');
+            const selected = rows.find((row) => row.key === wanted || qualityNumber(row.quality) === qualityNumber(wanted)) || rows[0]; if (!selected) throw webError || new Error('没有可用清晰度');
+            const item = selected.item || {};
+            const rawUrl = cleanUrl(item.main_url || item.backup_url);
+            const seed = Buffer.from(str(model.key_seed || info.key_seed), 'base64');
+            let url = rawUrl;
+            if (seed.length && rawUrl) { try { url = decryptSpadeUrl(rawUrl, seed) || rawUrl; } catch { url = rawUrl; } }
+            const spade = item.spade_a || (item.encrypt_info && item.encrypt_info.spade_a);
+            result = { url, quality: qualityLabel(selected.quality || selected.key), codec: selected.codec === 'hevc' ? 'hevc' : 'h264', ua: PLAYBACK_UA, key: spade ? deriveContentKey(spade) : null, channel: 'app' };
+            markChannel('app', true);
+        } catch (error) {
+            markChannel('app', false, error.message);
+            throw error;
+        }
     }
     streamCache.set(cacheKey, { time: Date.now(), value: result }); return result;
 }

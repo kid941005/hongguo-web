@@ -37,6 +37,9 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 .chip.active{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff;border-color:transparent}
 .notice{background:#2a1f14;border:1px solid #4a3a22;color:#f3c98b;padding:10px 14px;
   border-radius:10px;font-size:13px;margin-bottom:14px}
+/* 播放通道告警横幅：比 notice 更醒目（红果通道失效属于「主源不可用」，要用户立刻看到） */
+.healthbar{background:#3a1d1d;border:1px solid #7a2f2f;color:#ffb3b3;padding:10px 14px;
+  border-radius:10px;font-size:13px;margin-bottom:14px;line-height:1.5}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
 .card{position:relative;background:var(--panel);border-radius:var(--radius);overflow:hidden;cursor:pointer;
   border:1px solid transparent;transition:.15s;display:flex;flex-direction:column}

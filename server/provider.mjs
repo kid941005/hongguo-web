@@ -29,7 +29,7 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats};",
   context,
   { timeout: 5000 }
 );
@@ -226,6 +226,7 @@ export const provider = {
       }
       return {
         total: prepared.total,
+        channel: stream.channel || "app",
         chunk: async (start, end) =>
           api.decryptPartial(
             (await api.remoteRange(stream, start, end)).data,
@@ -268,6 +269,8 @@ export const provider = {
         openUntil: STREAM_BREAKER.openUntil,
         lastError: STREAM_BREAKER.lastError,
       },
+      // 通道级计数：web=官网明文通道（主），app=App CENC 通道（回落）
+      channels: api.channelStats || null,
     };
   },
 };

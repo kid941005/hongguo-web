@@ -62,6 +62,15 @@ await check("source-health", async () => {
   throw new Error(lastError);
 });
 
+await check("alerts", async () => {
+  const body = await getJson("/api/alerts");
+  if (!body || body.enabled !== true) throw new Error("播放监控未启用（PLAYBACK_MONITOR=0？）");
+  const allowed = ["ok", "degraded", "down", "unknown"];
+  if (!allowed.includes(body.status)) throw new Error("status 异常: " + body.status);
+  if (body.status === "down") throw new Error("通道不可用: " + (body.reason || "unknown"));
+  return body.status + (body.channel ? "/" + body.channel : "") + " checks=" + body.checks;
+});
+
 for (const item of results) {
   console.log((item.ok ? "PASS" : "FAIL") + "  " + item.name.padEnd(14) + " " + item.ms + "ms  " + item.detail);
 }

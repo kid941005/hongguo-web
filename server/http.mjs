@@ -95,7 +95,7 @@ function rateLimit(req) {
   }
 }
 
-export function createServer({ provider, sources, catalog, users = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
+export function createServer({ provider, sources, catalog, users = null, monitor = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
   const serveStatic = createStaticHandler(webDir);
   const serveStream = createStreamHandler({ provider, limit: maxStreams });
 
@@ -129,7 +129,16 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
         uptime: Math.round(process.uptime()),
         rss: process.memoryUsage().rss,
         ...(typeof provider.metrics === "function" ? provider.metrics() : {}),
+        playback: monitor ? monitor.snapshot() : null,
       })],
+
+    // ---- 播放通道监控告警 ----
+    ["GET", /^\/api\/alerts$/, ({ json }) =>
+      json(200, monitor ? monitor.snapshot() : { enabled: false, status: "disabled", alerts: [] })],
+    ["POST", /^\/api\/alerts\/check$/, async ({ json }) => {
+      if (!monitor) throw fail("NOT_FOUND", "播放监控未启用");
+      return json(200, await monitor.checkNow());
+    }],
 
     // ---- 账号（注册 / 登录 / 会话） ----
     ["POST", /^\/api\/auth\/register$/, async (ctx) => {
@@ -286,6 +295,16 @@ export function createServer({ provider, sources, catalog, users = null, webDir,
       const source = q.get("source") || "";
       if (source === "__all" || q.get("all") === "1") return json(200, await catalog.searchAll(keyword, page));
       return json(200, await catalog.search(source || undefined, keyword, page));
+    }],
+    // 播放降级：当前源播放失败时，按剧名到其它源找同一部剧
+    ["GET", /^\/api\/play\/fallback$/, async ({ json, q }) => {
+      const id = (q.get("id") || "").trim();
+      if (!id) throw fail("BAD_INPUT", "缺少剧 id");
+      const index = Number(q.get("index") || 0);
+      return json(200, await catalog.playFallback(q.get("source") || undefined, {
+        id,
+        index: Number.isFinite(index) ? index : 0,
+      }));
     }],
     ["GET", /^\/api\/detail$/, async ({ json, q }) => {
       const id = (q.get("id") || "").trim();

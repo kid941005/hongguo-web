@@ -5,6 +5,7 @@ import { provider } from "./provider.mjs";
 import { SourceManager } from "./sources/manager.mjs";
 import { createCatalog } from "./catalog.mjs";
 import { createServer } from "./http.mjs";
+import { createMonitor } from "./monitor.mjs";
 import { openDb } from "./db.mjs";
 import { UserStore } from "./users.mjs";
 
@@ -23,6 +24,14 @@ const SOURCE_UPDATE_INTERVAL_HOURS = Number.isFinite(updateIntervalHours) && upd
 const updateStartDelaySeconds = Number(process.env.SOURCE_UPDATE_START_DELAY_SECONDS);
 const SOURCE_UPDATE_START_DELAY_SECONDS = Number.isFinite(updateStartDelaySeconds) && updateStartDelaySeconds >= 0 ? updateStartDelaySeconds : 15;
 
+// 播放通道监控：定时深探针 + 状态翻转告警（可选 webhook），默认开启、10 分钟一轮。
+const PLAYBACK_MONITOR = process.env.PLAYBACK_MONITOR !== "0";
+const monitorMinutes = Number(process.env.PLAYBACK_MONITOR_INTERVAL_MINUTES);
+const PLAYBACK_MONITOR_INTERVAL_MINUTES = Number.isFinite(monitorMinutes) && monitorMinutes >= 1 ? monitorMinutes : 10;
+const alertThreshold = Number(process.env.PLAYBACK_ALERT_THRESHOLD);
+const PLAYBACK_ALERT_THRESHOLD = Number.isFinite(alertThreshold) && alertThreshold >= 1 ? Math.floor(alertThreshold) : 3;
+const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || "";
+
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   console.error("PORT 无效: " + process.env.PORT);
   process.exit(1);
@@ -30,6 +39,16 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 
 const sources = new SourceManager({ builtinDir: BUILTIN_DIR, dataDir: DATA_DIR });
 const catalog = createCatalog({ provider, sources });
+const monitor = PLAYBACK_MONITOR
+  ? createMonitor({
+    provider,
+    catalog,
+    intervalMs: PLAYBACK_MONITOR_INTERVAL_MINUTES * 60 * 1000,
+    threshold: PLAYBACK_ALERT_THRESHOLD,
+    webhookUrl: ALERT_WEBHOOK_URL,
+    version,
+  })
+  : null;
 const db = openDb(DATA_DIR);
 const users = new UserStore(db);
 const server = createServer({
@@ -37,6 +56,7 @@ const server = createServer({
   sources,
   catalog,
   users,
+  monitor,
   webDir: path.join(ROOT, "web"),
   token: TOKEN,
   version,
@@ -63,6 +83,8 @@ server.listen(PORT, HOST, () => {
       initialDelayMs: SOURCE_UPDATE_START_DELAY_SECONDS * 1000,
     });
   }
+  // 首轮探针等预热跑完再开始，避免和推荐池抓取抢上游配额。
+  if (monitor) monitor.start({ initialDelayMs: 20000 });
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -85,6 +107,7 @@ function shutdown(signal) {
   if (closing) return;
   closing = true;
   console.log(JSON.stringify({ event: "shutdown", signal }));
+  try { if (monitor) monitor.stop(); } catch {}
   try { sources.close(); } catch {}
   server.close(() => {
     try { db.close(); } catch {}
