@@ -401,7 +401,17 @@ export function createCatalog({ provider, sources }) {
     if (!id) throw fail("BAD_INPUT", "缺少剧集 id");
     if (entry.type === "builtin") {
       if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
-      return { type: "native", url: "/api/stream/" + id, contentType: "video/mp4" };
+      // 红果官方明文兜底流固定 360P；高清（720P+）走 DRM 保护通道，
+      // 本站服务端未实现 DRM 解密，故只标注单档并说明原因，不伪造选项。
+      return {
+        type: "native",
+        url: "/api/stream/" + id,
+        contentType: "video/mp4",
+        quality: {
+          options: [{ key: "auto", label: "360P", height: 360 }],
+          note: "红果官方高清（720P 及以上）为 DRM 保护通道，本站当前仅提供 360P 明文流。",
+        },
+      };
     }
 
     const out = await sources.runtime(entry.id).call("play", [String(flag || "flag"), String(id), []], TIMEOUT_SEARCH);

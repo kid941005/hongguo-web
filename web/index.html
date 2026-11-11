@@ -99,8 +99,12 @@
     <div class="player-bar">
       <span id="pTitle" class="ptitle"></span>
       <div class="pactions">
+        <span id="resBadge" class="resbadge hidden" title="当前播放分辨率"></span>
         <button id="btnRate" class="btn ghost" title="播放倍速（点击切换，快捷键 , 减速 / . 加速；会记住你的选择）">1.0×</button>
-        <button id="btnQuality" class="btn ghost hidden" title="清晰度（仅 HLS 多码率源可用）">自动</button>
+        <div class="qwrap">
+          <button id="btnQuality" class="btn ghost" title="清晰度 / 当前分辨率">清晰度 自动</button>
+          <div id="qualityMenu" class="qmenu hidden"></div>
+        </div>
         <button id="btnFull" class="btn ghost" title="全屏（快捷键 F）">全屏</button>
         <button id="btnNext" class="btn ghost" title="下一集（快捷键 N）">下一集</button>
         <button id="btnClosePlayer" class="btn ghost" title="关闭播放器（快捷键 Esc 退出全屏）">关闭 ✕</button>

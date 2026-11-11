@@ -31,7 +31,7 @@ docker compose up -d        # 默认使用已发布镜像 ghcr.io/kid941005/hong
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.8.3","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.8.4","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 里的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败会标记为 unhealthy。发布后可用 `BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs` 跑六项冒烟（health / 源列表 / 首页 / 猜你喜欢 / 源自检取流 / 播放监控）。
@@ -110,7 +110,7 @@ docker run -d --name hongguo-web \
   -v hongguo-data:/app/data \
   --restart unless-stopped \
   --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
-  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.8.3
+  ghcr.io/kid941005/hongguo-web:latest  # 想固定版本可写 :0.8.4
 ```
 
 参数与 [compose.yaml](compose.yaml) 对应（示例省略了 `ALLOW_PRIVATE_FETCH` 与源自动更新变量，未写时使用默认值），只是不经过 compose。
@@ -166,7 +166,7 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 - **收藏 / 追剧提醒**：详情页「☆ 收藏」「🔔 追更」；顶栏「历史 ▾」菜单里的「☆ 收藏」「🔔 追剧」打开列表。追更会定时（默认 10 分钟，打开面板或页面重新可见时也会）检查集数变化，有新集时角标显示新增集数并弹出提示，面板里点「检查更新」可立即检查。
 - **多设备同步**：历史、收藏、追更都存在服务端 SQLite（`DATA_DIR/hongguo.db`）。本地历史与服务端按时间戳取新合并，旧进度不会覆盖新进度。
 - **PWA（装到桌面/手机主屏）**：Chrome/Edge 地址栏右侧会出现「安装」；手机浏览器「添加到主屏幕」后以独立窗口运行。Service Worker 需要安全上下文（`http://localhost` 或 HTTPS），用局域网 IP 的纯 HTTP 打开时页面可用但没有离线缓存、不能安装。
-- **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，控制条实时显示当前倍速；刷新页面、换集都会保持，点开新剧默认 1.0×）。未登录时记在本机，登录后随账号**跨设备同步**（服务端 SQLite），不同账号各存各的；清空浏览器缓存后回到 1.0×。清晰度切换（仅 HLS 多码率源出现，单码率自动隐藏）、全屏（按钮 / 双击画面 / F 键）。
+- **播放器**：倍速 0.5×–2×（点 `1.0×` 循环，控制条实时显示当前倍速；刷新页面、换集都会保持，点开新剧默认 1.0×）。未登录时记在本机，登录后随账号**跨设备同步**（服务端 SQLite），不同账号各存各的；清空浏览器缓存后回到 1.0×。清晰度与分辨率：控制条常显**当前解码分辨率**徽标（360P/720P/1080P…，取自 `video.videoWidth/Height`，与实际画面一致）；点「清晰度」可查看档位——HLS master 多码率源可在「自动 / 各档」间切换并尽量保持播放位置，单码率 HLS 与 MP4 直链只显示「该源仅此一种清晰度」，不伪造选项。全屏（按钮 / 双击画面 / F 键）。
 - **深链**：`/?rec=1`（直接打开推荐页）、`/?foryou=1`（直接打开猜你喜欢）、`/?source=qimao`、`/?source=__all&q=总裁`、`/?source=qimao&id=5207`、`/?source=qimao&id=5207&ep=0`（直接播放第 N 集，从 0 开始计数）。
 
 ## 3.1 前端存储
@@ -318,7 +318,7 @@ var spider = {
 - **降级换源依赖别家也有同名剧**：替代源是在其它源的搜索结果里按标题相似度找的，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
-- **清晰度切换依赖源**：只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有清晰度可切；单码率 HLS 与 MP4 直链没有可选清晰度，按钮会自动隐藏。
+- **清晰度取决于源**：分辨率徽标始终显示**实际解码分辨率**（权威）。只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有档位可切；单码率 HLS 与 MP4 直链的可选档位只有一项，菜单里会明确标注「该源仅此一种清晰度」，不会伪造档位。红果内置源当前只有官网 360P 明文流（高清 720P+ 走 DRM 通道），菜单会附原因说明。
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：各源并发、先返回先展示，不会等最慢的源；单源聚合上限 12 秒（内置红果 30 秒），超时或失败只丢该源并在提示条注明。模板/示例源（`template`、`maccms`）默认不参与聚合，避免 404 与示例数据噪音。
 - **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。

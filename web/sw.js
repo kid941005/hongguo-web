@@ -1,5 +1,5 @@
 /* 红果短剧网页版 Service Worker：静态资源缓存优先，页面导航网络优先 */
-const VERSION = 'hg-v0.8.3';
+const VERSION = 'hg-v0.8.4';
 const STATIC_CACHE = VERSION + '-static';
 const PRECACHE = [
   '/', '/index.html', '/style.css', '/app.js',

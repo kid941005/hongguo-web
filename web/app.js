@@ -8,7 +8,7 @@
     mode: 'home', tid: '', q: '', detail: null, line: 0, epIdx: 0, viewSource: '',
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
-    rate: 1, quality: -1, levels: [],
+    rate: 1, quality: -1, levels: [], qualityOptions: [], qualityNote: '',
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
     user: null, favs: [], follows: []
@@ -917,7 +917,7 @@
     updateResumeBar(d);
     if (!autoNext) toast('正在解析播放地址…');
     api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id }).then(function (r) {
-      openPlayer(r.url, r.type, startAt, autoNext);
+      openPlayer(r.url, r.type, startAt, autoNext, r.quality);
     }).catch(function (e) {
       var msg = (e && e.message) || '未知错误';
       if (autoNext) toast('下一集播放失败：' + msg);
@@ -976,7 +976,7 @@
     setRate(RATES[i]);
   }
 
-  // ---- 清晰度（HLS 多码率） ----
+  // ---- 清晰度 / 当前分辨率 ----
   function levelLabel(lv) {
     if (!lv) return '自动';
     if (lv.name) { var n = String(lv.name).trim(); return /p$/i.test(n) ? n.toUpperCase() : n + 'P'; }
@@ -984,22 +984,100 @@
     if (lv.bitrate) return Math.round(lv.bitrate / 1000) + 'K';
     return '码率';
   }
-  function updateQualityBtn() {
-    var btn = $('btnQuality');
-    if (!btn) return;
-    var n = (state.levels || []).length;
-    btn.classList.toggle('hidden', n <= 1);
-    var lv = state.quality >= 0 ? state.levels[state.quality] : null;
-    btn.textContent = '清晰度 ' + (state.quality < 0 ? '自动' : levelLabel(lv));
-    btn.classList.toggle('on', state.quality >= 0);
+  // 视频元素实际解码出的分辨率才是权威：360x640→360P、1280x720→720P、1920x1080→1080P。
+  function resLabelFromSize(w, h) {
+    if (!w || !h) return '';
+    return Math.min(w, h) + 'P';
   }
+  function currentResolutionLabel() {
+    var v = $('video');
+    return v ? resLabelFromSize(v.videoWidth, v.videoHeight) : '';
+  }
+  function updateResBadge() {
+    var v = $('video'); var b = $('resBadge'); if (!b) return;
+    var w = v ? v.videoWidth : 0, h = v ? v.videoHeight : 0;
+    var lab = resLabelFromSize(w, h);
+    b.textContent = lab;
+    b.title = lab ? ('当前播放分辨率 ' + w + '×' + h) : '当前播放分辨率';
+    b.classList.toggle('hidden', !lab);
+  }
+  function updateQualityBtn() {
+    var btn = $('btnQuality'); if (!btn) return;
+    var multi = (state.qualityOptions || []).length > 1;
+    var chosen = state.quality >= 0 && state.levels[state.quality] ? levelLabel(state.levels[state.quality]) : '';
+    btn.textContent = '清晰度 ' + (chosen || currentResolutionLabel() || '自动');
+    btn.classList.toggle('on', multi);
+  }
+  function buildQualityMenu() {
+    var menu = $('qualityMenu'); if (!menu) return;
+    menu.textContent = '';
+    var opts = state.qualityOptions || [];
+    if (opts.length <= 1) {
+      var single = document.createElement('div');
+      single.className = 'qitem disabled';
+      single.textContent = (currentResolutionLabel() || '原画') + '（该源仅此一种清晰度）';
+      menu.appendChild(single);
+    } else {
+      opts.forEach(function (o) {
+        var d = document.createElement('div');
+        var active = (o.levelIndex != null && o.levelIndex === state.quality) || (o.levelIndex === -1 && state.quality < 0);
+        d.className = 'qitem' + (active ? ' active' : '');
+        d.textContent = o.label;
+        d.addEventListener('click', function () { selectQuality(o); });
+        menu.appendChild(d);
+      });
+    }
+    if (state.qualityNote) {
+      var note = document.createElement('div'); note.className = 'qnote'; note.textContent = state.qualityNote;
+      menu.appendChild(note);
+    }
+  }
+  // 菜单挂到 body 并用 fixed 定位，避免被 .pactions 的 overflow 裁剪、也保证盖在 video 之上。
+  function positionQualityMenu() {
+    var m = $('qualityMenu'); var b = $('btnQuality'); if (!m || !b) return;
+    var r = b.getBoundingClientRect();
+    m.style.position = 'fixed';
+    m.style.zIndex = '110';
+    m.style.right = 'auto';
+    var w = m.offsetWidth || 180;
+    var left = Math.min(Math.max(8, r.right - w), window.innerWidth - 8 - w);
+    m.style.left = left + 'px';
+    var mh = m.offsetHeight || 0;
+    var top = r.bottom + 8;
+    if (top + mh > window.innerHeight - 8 && r.top - mh - 8 > 8) top = r.top - mh - 8;
+    m.style.top = top + 'px';
+  }
+  function toggleQualityMenu(e) {
+    if (e) { e.stopPropagation(); }
+    var m = $('qualityMenu'); if (!m) return;
+    var willShow = m.classList.contains('hidden');
+    if (willShow) {
+      if (m.parentElement !== document.body) document.body.appendChild(m);
+      m.classList.remove('hidden');
+      buildQualityMenu();
+      positionQualityMenu();
+    } else {
+      m.classList.add('hidden');
+    }
+  }
+  function closeQualityMenu() { var m = $('qualityMenu'); if (m) m.classList.add('hidden'); }
+  function selectQuality(o) {
+    closeQualityMenu();
+    if (o.levelIndex != null && state.hls && (state.qualityOptions || []).length > 1) {
+      state.quality = o.levelIndex;
+      try { state.hls.currentLevel = o.levelIndex; } catch (e) {}
+      updateQualityBtn();
+      toast('清晰度：' + (o.levelIndex < 0 ? '自动' : o.label));
+    } else {
+      toast('该源仅提供 ' + (currentResolutionLabel() || '单一') + ' 清晰度');
+    }
+  }
+  // 兼容旧调试钩子：无多档时提示，有 HLS 多档时在档位间循环。
   function cycleQuality() {
-    var n = (state.levels || []).length;
-    if (n <= 1) { toast('该视频只有单一清晰度'); return; }
-    state.quality = state.quality + 1 >= n ? -1 : state.quality + 1;
-    if (state.hls) { try { state.hls.currentLevel = state.quality; } catch (e) {} }
-    updateQualityBtn();
-    toast('清晰度：' + (state.quality < 0 ? '自动' : levelLabel(state.levels[state.quality])));
+    var opts = (state.qualityOptions || []).filter(function (o) { return o.levelIndex != null; });
+    if (opts.length <= 1) { toast('该视频只有单一清晰度'); return; }
+    var idx = opts.findIndex(function (o) { return o.levelIndex === state.quality; });
+    selectQuality(opts[(idx + 1) % opts.length]);
   }
 
   // ---- 全屏 ----
@@ -1113,13 +1191,22 @@
     }).catch(function (e) { toast('切换失败：' + e.message); });
   }
 
-  function openPlayer(url, type, startAt, auto) {
+  function openPlayer(url, type, startAt, auto, qualityInfo) {
     var v = $('video');
     url = authUrl(url);
     state.pendingSeek = Math.max(0, Math.floor(startAt || 0));
     state.lastSave = 0;
     state.quality = -1;
     state.levels = [];
+    state.qualityOptions = [];
+    state.qualityNote = '';
+    if (qualityInfo && Array.isArray(qualityInfo.options) && qualityInfo.options.length) {
+      state.qualityOptions = qualityInfo.options.map(function (o) {
+        return { key: o.key, label: o.label, height: o.height, levelIndex: null };
+      });
+      state.qualityNote = qualityInfo.note || '';
+    }
+    updateResBadge();
     updateQualityBtn();
     destroyHls();
     hidePlayerError();
@@ -1136,7 +1223,16 @@
           state.levels = (hls.levels || []).map(function (lv) {
             return { height: lv.height, bitrate: lv.bitrate, name: lv.name || '' };
           });
+          // 真正的多码率 HLS（master playlist）才给出多档选项；单码率只显示实际分辨率。
+          if (state.levels.length > 1) {
+            state.qualityOptions = [{ label: '自动', levelIndex: -1 }].concat(state.levels.map(function (lv, i) {
+              return { label: levelLabel(lv), levelIndex: i };
+            }));
+          }
           updateQualityBtn();
+        });
+        hls.on(window.Hls.Events.LEVEL_SWITCHED, function () {
+          updateResBadge(); updateQualityBtn();
         });
         var recovered = false;
         hls.on(window.Hls.Events.ERROR, function (_e, data) {
@@ -1214,6 +1310,8 @@
       // 有些浏览器在换源/换集后会把 playbackRate 复位，元数据就绪时按记住的倍速再设一次。
       try { v.playbackRate = state.rate; } catch (e) {}
       $('btnRate').textContent = rateLabel(state.rate);
+      updateResBadge();
+      updateQualityBtn();
       if (state.pendingSeek > 3 && isFinite(v.duration) && state.pendingSeek < v.duration - 3) {
         try { v.currentTime = state.pendingSeek; } catch (e) {}
         toast('已续播至 ' + fmtDur(state.pendingSeek));
@@ -1251,6 +1349,7 @@
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     var v = $('video'), k = e.key;
+    if (k === 'Escape') { closeQualityMenu(); return; }
     if (k === ' ' || k === 'Spacebar' || k === 'k' || k === 'K') {
       e.preventDefault();
       if (v.paused) { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); }
@@ -1280,6 +1379,7 @@
 
   function closePlayer() {
     var v = $('video');
+    closeQualityMenu();
     hidePlayerError();
     state.autoNextLatch = false;
     saveProgress(v);
@@ -1642,7 +1742,11 @@
   $('btnManageClose').addEventListener('click', closeManage);
   $('btnCheckUpdates').addEventListener('click', checkSourceUpdates);
   $('btnRate').addEventListener('click', function () { cycleRate(1); });
-  $('btnQuality').addEventListener('click', cycleQuality);
+  $('btnQuality').addEventListener('click', toggleQualityMenu);
+  document.addEventListener('click', function (e) {
+    var w = document.querySelector('.qwrap'); var m = $('qualityMenu');
+    if ((!w || !w.contains(e.target)) && (!m || !m.contains(e.target))) closeQualityMenu();
+  });
   $('btnFull').addEventListener('click', toggleFullscreen);
   $('btnHistory').addEventListener('click', openHistory);
   $('btnHistClose').addEventListener('click', closeHistory);
