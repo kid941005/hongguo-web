@@ -94,7 +94,7 @@ function titleScore(a, b) {
 }
 
 // vod_play_url: 线路用 $$$ 分隔，集用 # 分隔，每集「集名$集ID」
-function splitPlayUrl(vodPlayUrl, vodPlayFrom) {
+export function splitPlayUrl(vodPlayUrl, vodPlayFrom) {
   const urlStr = String(vodPlayUrl || "");
   if (!urlStr) return [];
   const froms = String(vodPlayFrom || "").split("$$$");
@@ -135,7 +135,7 @@ function nextPage(result, items, current, pageCount) {
   return pageCount ? current < pageCount : true;
 }
 
-function classifyUrl(url) {
+export function classifyUrl(url) {
   const value = String(url || "");
   if (/\.m3u8(\?|#|$)/i.test(value) || /\/m3u8/i.test(value) || /format=m3u8/i.test(value)) return "hls";
   if (/\.(mp4|m4v|mov)(\?|#|$)/i.test(value)) return "mp4";

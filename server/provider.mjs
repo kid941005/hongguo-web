@@ -48,7 +48,7 @@ const VENDOR_EXPORTS = [
   "deriveContentKey",
 ];
 
-function loadVendor() {
+export function loadVendor() {
   const source = fs.readFileSync(VENDOR_FILE, "utf8");
   const context = vm.createContext({
     require: (name) => {
@@ -92,6 +92,8 @@ function loadVendor() {
 }
 
 const api = loadVendor();
+// 自测（server/selftest.mjs）直接复用这一份已加载的 vendor 上下文，不重复起 vm。
+export const vendor = api;
 // 官方播放模型（多档 HEVC）：设备身份注册与内容密钥派生都复用 vendor 里已验证的实现。
 const official = createOfficial({
   register: () => api.registerPlaybackDevice(),

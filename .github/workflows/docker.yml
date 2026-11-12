@@ -34,6 +34,14 @@ jobs:
             echo "version=edge" >> "$GITHUB_OUTPUT"
           fi
 
+      # 密钥派生/分块解密/播放签名这些纯逻辑一旦改坏，镜像是能构建成功的，
+      # 只是上线后所有播放失效。构建前先离线自测（不联网）。
+      - name: Selftest (offline)
+        run: |
+          set -eu
+          npm --prefix server install --omit=dev --no-audit --no-fund
+          npm --prefix server run selftest
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:

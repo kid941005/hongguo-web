@@ -212,6 +212,7 @@ hongguo-web/
 │  ├─ db.mjs               # SQLite（node:sqlite）：用户/令牌/历史/收藏/追更
 │  ├─ users.mjs            # 账号与个人数据读写（UserStore）
 │  ├─ http.mjs             # 路由表、鉴权、请求分发
+│  ├─ selftest.mjs         # 离线自测：密钥派生/分块解密/播放签名/地址拆分/首块校验/熔断/错误码
 │  ├─ scripts/smoke.mjs    # 发布冒烟：health/源/首页/源自检
 │  └─ sources/
 │     ├─ runtime.mjs       # 单文件 JS 源的沙箱运行时装配（每源独立 worker_threads，仅消息通道暴露 fetch）
@@ -221,6 +222,18 @@ hongguo-web/
 ├─ sources/builtin/        # 内置 JS 源：qimao / xifan / xingya / niuniu / template / maccms
 └─ web/                    # 前端静态页 + hls.js + PWA（manifest / sw.js / icons/）
 ```
+
+### 4.1 离线自测
+
+改密钥派生、分块解密、播放签名这类「改一行就可能让所有播放失效」的代码前后，先跑一遍离线自测（不联网、不读 `data/`）：
+
+```bash
+docker run --rm -v "$PWD":/w -w /w node:22-bookworm-slim sh -c \
+  "npm --prefix server install --omit=dev --no-audit --no-fund && node server/selftest.mjs"
+```
+
+本机有 Node 22.5+ 时直接 `npm --prefix server install --omit=dev && node server/selftest.mjs` 即可。
+黄金向量钉住的是「当前已验证行为」：上游 vendor 换算法时它会失败，这是预期——先人工确认新算法，再更新向量。
 
 ## 5. 自定义 JS 源格式（糖葫芦同款）
 
