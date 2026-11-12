@@ -4,6 +4,11 @@ import { fail } from "./errors.mjs";
 // 约定：所有对外方法都返回 { source, items|lines|episodes, ... }，字段缺失一律给空值而不是 undefined。
 
 const TIMEOUT_HOME = 40000;
+// 首页 stale-while-revalidate：新鲜期内直出；过期先回上次成功的结果、后台刷新。
+// 上游偶发 502/超时不应该让首页整页报错，也不该让每个访客都等一次上游。
+const HOME_FRESH_MS = 90 * 1000;
+const HOME_STALE_MS = 6 * 60 * 60 * 1000;
+const HOME_CACHE_MAX = 16;
 const TIMEOUT_SEARCH = 60000;
 const TIMEOUT_AGGREGATE = 12000; // 聚合搜索单源上限：慢源不拖住整体
 // 模板/示例源不参与聚合，避免「示例剧」和 example.com 404 污染结果。
@@ -240,6 +245,8 @@ function createBuiltinSearch(provider) {
 
 export function createCatalog({ provider, sources }) {
   const builtinSearch = createBuiltinSearch(provider);
+  // 推荐池最后一次成功的结果：上游整批失败时用它兜底。
+  let recommendGood = null;
 
   function entryOf(sourceId) {
     const entry = sources.get(sourceId);
@@ -247,9 +254,13 @@ export function createCatalog({ provider, sources }) {
     return entry;
   }
 
-  async function home(sourceId, page = 1) {
-    const entry = entryOf(sourceId);
-    const pageNo = Number(page) || 1;
+  // 缓存键：不同源、不同页各自一份，避免切源时串味。
+  const homeCache = new Map(); // key -> { at, payload }
+  const homePending = new Map(); // key -> Promise（防重入：并发只打一次上游）
+  const homeKey = (sourceId, pageNo) => sourceId + ":" + pageNo;
+
+  // 真正的取数逻辑（原 home 主体）：只负责取，不碰缓存。
+  async function fetchHome(entry, pageNo) {
     if (entry.type === "builtin") {
       const data = await withTimeout(provider.home(pageNo), 30000, "首页加载超时");
       const items = toItems(data.items);
@@ -295,6 +306,47 @@ export function createCatalog({ provider, sources }) {
       hasMore: false,
       filters: (result && !Array.isArray(result) && result.filters) || {},
     };
+  }
+
+  // 刷新并落缓存；同一 key 并发只跑一份。
+  function refreshHome(entry, pageNo) {
+    const key = homeKey(entry.id, pageNo);
+    const running = homePending.get(key);
+    if (running) return running;
+    const task = fetchHome(entry, pageNo)
+      .then((payload) => {
+        // 重新插入到队尾，让 Map 的迭代顺序≈最近使用顺序，淘汰时先丢最久没刷新的。
+        homeCache.delete(key);
+        homeCache.set(key, { at: Date.now(), payload });
+        while (homeCache.size > HOME_CACHE_MAX) homeCache.delete(homeCache.keys().next().value);
+        return payload;
+      })
+      .finally(() => {
+        if (homePending.get(key) === task) homePending.delete(key);
+      });
+    homePending.set(key, task);
+    return task;
+  }
+
+  async function home(sourceId, page = 1, options = {}) {
+    const entry = entryOf(sourceId);
+    const pageNo = Number(page) || 1;
+    const key = homeKey(entry.id, pageNo);
+    const cached = options && options.force ? null : homeCache.get(key);
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (cached && age < HOME_FRESH_MS) return { ...cached.payload, stale: false, age };
+    if (cached && age < HOME_STALE_MS) {
+      // 过期但还能用：先回上次成功的结果，后台刷新；刷新失败也不影响这次返回。
+      refreshHome(entry, pageNo).catch(() => {});
+      return { ...cached.payload, stale: true, age };
+    }
+    try {
+      return { ...(await refreshHome(entry, pageNo)), stale: false, age: 0 };
+    } catch (error) {
+      // 冷缓存 + 刷新失败才真的报错；有历史结果就退回旧首页（可能已很旧）。
+      if (cached) return { ...cached.payload, stale: true, age };
+      throw error;
+    }
   }
 
   async function category(sourceId, tid, page, extend) {
@@ -588,7 +640,8 @@ export function createCatalog({ provider, sources }) {
     let lastError = "";
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const homeData = await withTimeout(home(entry.id, 1), 15000, "健康检查超时");
+        // 健康检查要探真实上游：force 绕过首页缓存，否则缓存命中会把故障源判成正常。
+        const homeData = await withTimeout(home(entry.id, 1, { force: true }), 15000, "健康检查超时");
         let playback = null;
         if (deep && entry.type === "builtin" && homeData.items.length) {
           const first = homeData.items[0];
@@ -643,7 +696,17 @@ export function createCatalog({ provider, sources }) {
   // 推荐页：红果各榜单按真实评分合并后的稳定列表，按页切分给前端。
   async function recommend(page = 1) {
     const pageNo = Number(page) || 1;
-    const pool = await withTimeout(provider.recommendPool(), 45000, "推荐加载超时");
+    let pool = null;
+    let stale = false;
+    try {
+      pool = await withTimeout(provider.recommendPool(), 45000, "推荐加载超时");
+      recommendGood = { at: Date.now(), pool };
+    } catch (error) {
+      // 四条榜整批失败（上游风控/网络）时回落上次成功的结果，推荐页不至于整页报错。
+      if (!recommendGood) throw error;
+      pool = recommendGood.pool;
+      stale = true;
+    }
     const start = (pageNo - 1) * RECOMMEND_PER_PAGE;
     const slice = pool.slice(start, start + RECOMMEND_PER_PAGE);
     return {
@@ -666,6 +729,7 @@ export function createCatalog({ provider, sources }) {
       }).filter(Boolean),
       hasMore: start + slice.length < pool.length,
       total: pool.length,
+      stale,
     };
   }
 
