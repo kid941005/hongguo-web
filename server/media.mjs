@@ -44,6 +44,11 @@ const FALLBACK_SVG =
 
 const IMAGE_PATH = /\.(?:jpe?g|png|webp|gif|avif|bmp|ico)$/i;
 
+// 只透传「确实是媒体」的 content-type。上游把错误页/登录页/JSON 当视频返回时，
+// 原样透传 text/html 会让它在本站同源下被当页面执行（review S4），也把代理变成开放网页代理。
+const MEDIA_TYPE =
+  /^(?:video\/[a-z0-9.+-]+|audio\/[a-z0-9.+-]+|image\/[a-z0-9.+-]+|application\/(?:vnd\.apple\.mpegurl|x-mpegurl|octet-stream|mp4|dash\+xml)|text\/plain)$/i;
+
 // 是不是图片请求：先看 Accept（<img> 会带 image/*），再看路径后缀（部分源用无后缀的图床地址）。
 function wantsImage(req, url) {
   const accept = String(req.headers.accept || "");
@@ -99,13 +104,17 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
   }
 
   const out = {};
-  for (const key of ["content-type", "content-length", "accept-ranges", "content-range", "etag", "last-modified"]) {
+  for (const key of ["content-length", "accept-ranges", "content-range", "etag", "last-modified"]) {
     const value = upstream.headers.get(key);
     if (value) out[key] = value;
   }
   if (!out["accept-ranges"]) out["accept-ranges"] = "bytes";
+  const upstreamType = String(upstream.headers.get("content-type") || "").split(";")[0].trim();
+  const isMedia = MEDIA_TYPE.test(upstreamType);
+  out["content-type"] = isMedia ? upstream.headers.get("content-type") : "application/octet-stream";
   out["cache-control"] = "public, max-age=1800";
-  out["access-control-allow-origin"] = "*";
+  // 跨域读只对媒体类型开放；非媒体（多半是上游错误页）连 CORS 都不给。
+  if (isMedia) out["access-control-allow-origin"] = "*";
   res.writeHead(upstream.status, out);
   if (req.method === "HEAD" || !upstream.body) return res.end();
 
@@ -173,7 +182,7 @@ export async function proxyHls(req, res, { url, referer, token, ua }) {
 
   const suffix =
     (referer ? "&r=" + encodeURIComponent(referer) : "") +
-    (token ? "&token=" + encodeURIComponent(token) : "") +
+    (token ? "&st=" + encodeURIComponent(token) : "") +
     (userAgent ? "&ua=" + encodeURIComponent(userAgent) : "");
   const rewrite = (raw, hint) => {
     let abs;

@@ -110,9 +110,10 @@ export class UserStore {
 
   // 推荐用：按用户聚合全部观看记录（只读，仅用于协同过滤打分；不对外暴露原始数据）。
   allHistory(maxUsers = 400) {
+    // 推荐只吃最近的行为：不加 LIMIT 时全表扫描会随历史线性变慢（review S10）。
     const rows = this.db
-      .prepare("SELECT user_id, source, vod_id, title, cover, updated_at FROM history ORDER BY updated_at DESC")
-      .all();
+      .prepare("SELECT user_id, source, vod_id, title, cover, updated_at FROM history ORDER BY updated_at DESC LIMIT ?")
+      .all(Math.max(1, maxUsers) * 50);
     const byUser = new Map();
     for (const row of rows) {
       const uid = Number(row.user_id);
@@ -130,7 +131,11 @@ export class UserStore {
     const vodId = str(item.id, 128);
     if (!vodId) throw fail("BAD_INPUT", "缺少剧集 id");
     // 允许客户端上报的 at 略早于服务端，但不接受未来时间，避免提前占位。
-    const at = Math.min(Date.now() + 5 * 60 * 1000, Math.max(0, Math.floor(num(item.at, Date.now()))) || Date.now());
+    // at=0 是合法值（1970），不能被 `|| Date.now()` 吞掉，否则客户端显式给 0 会变成「现在」（review S14）。
+    const rawAt = num(item.at, NaN);
+    const at = Number.isFinite(rawAt)
+      ? Math.min(Date.now() + 5 * 60 * 1000, Math.max(0, Math.floor(rawAt)))
+      : Date.now();
     const lineIdx = Math.max(0, Math.floor(num(item.lineIdx)));
     const epIdx = Math.max(0, Math.floor(num(item.epIdx)));
     const pos = Math.max(0, num(item.pos));

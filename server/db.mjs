@@ -78,6 +78,10 @@ export function openDb(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "hongguo.db");
   const db = new DatabaseSync(file);
+  // 多设备同时写（历史/收藏/追更）时，SQLite 默认立刻抛 SQLITE_BUSY；
+  // 给 5 秒等待窗口，让并发写退化成「慢一点」而不是 500（review S10）。
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA journal_mode = WAL");
   db.exec(SCHEMA);
   return db;
 }

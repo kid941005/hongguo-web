@@ -38,6 +38,15 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   process.exit(1);
 }
 
+// 源导入会把脚本送进 vm 执行：没口令时它只对内网来源开放（见 http.mjs ADMIN_WRITE）。
+// 这里把「当前处于无口令模式」明确写进启动日志，避免部署者以为默认就有访问控制。
+if (!TOKEN) {
+  console.warn(JSON.stringify({
+    event: "no_access_token",
+    message: "未设置 TOKEN：管理接口（源导入/清缓存）仅接受内网来源；对外网开放请设置 TOKEN",
+  }));
+}
+
 const sources = new SourceManager({ builtinDir: BUILTIN_DIR, dataDir: DATA_DIR });
 const catalog = createCatalog({ provider, sources });
 const monitor = PLAYBACK_MONITOR

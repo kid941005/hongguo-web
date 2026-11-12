@@ -171,7 +171,9 @@ export class SourceManager {
       if (!registry.has(id)) this.disposeRuntime(id);
     }
     this.registry = registry;
-    this.activeId = registry.has(this.readActive()) ? this.readActive() : BUILTIN_ID;
+    // readActive() 会读文件，别为同一个值读两次。
+    const storedActive = this.readActive();
+    this.activeId = registry.has(storedActive) ? storedActive : BUILTIN_ID;
   }
 
   get(id) {
@@ -181,11 +183,14 @@ export class SourceManager {
   runtime(id) {
     const entry = this.get(id);
     if (!entry || entry.type !== "js") return null;
-    let runtime = this.runtimes.get(id);
+    // 缓存键一律用 entry.id：get(id) 在 id 为空时会回落到 activeId，
+    // 用原始 id 当键会缓存成 undefined 槽位，切源后既不命中也不释放（review S15）。
+    const key = entry.id;
+    let runtime = this.runtimes.get(key);
     if (!runtime || runtime.file !== entry.file) {
-      if (runtime) this.disposeRuntime(id);
+      if (runtime) this.disposeRuntime(key);
       runtime = new SourceRuntime({ code: fs.readFileSync(entry.file, "utf8"), meta: entry, file: entry.file });
-      this.runtimes.set(id, runtime);
+      this.runtimes.set(key, runtime);
     }
     return runtime;
   }

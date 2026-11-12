@@ -52,17 +52,18 @@ export function createStaticHandler(webDir) {
       throw fail("NOT_FOUND", "文件不存在");
     }
 
-    let data;
+    // 只 stat 不读文件：ETag 只依赖 size+mtime，304 命中时不必把 app.js 整个读进内存（review S9）。
     let stat;
     try {
-      [stat, data] = await Promise.all([fs.promises.stat(real), fs.promises.readFile(real)]);
+      stat = await fs.promises.stat(real);
     } catch {
       throw fail("NOT_FOUND", "文件不存在");
     }
+    if (!stat.isFile()) throw fail("NOT_FOUND", "文件不存在");
 
     // ETag 让「每次都回源校验」变成廉价的 304：静态资源一律 no-cache（可缓存但必须校验），
     // 内容没变时只回 304 空响应，Service Worker 与浏览器都不必重新下载 app.js/style.css。
-    const etag = '"' + data.length.toString(16) + "-" + Math.floor(stat.mtimeMs).toString(16) + '"';
+    const etag = '"' + stat.size.toString(16) + "-" + Math.floor(stat.mtimeMs).toString(16) + '"';
     const cacheHeaders = { "cache-control": "no-cache", etag };
     const ifNoneMatch = req.headers["if-none-match"];
     if (ifNoneMatch && ifNoneMatch.split(",").some((tag) => {
@@ -75,10 +76,17 @@ export function createStaticHandler(webDir) {
 
     res.writeHead(200, {
       "content-type": MIME[path.extname(real).toLowerCase()] || "application/octet-stream",
-      "content-length": data.length,
+      "content-length": stat.size,
       ...cacheHeaders,
     });
     if (req.method === "HEAD") return res.end();
-    res.end(data);
+    // 流式发送：大文件（hls.js 300KB、图标）不再整份进内存。
+    await new Promise((resolve, reject) => {
+      const source = fs.createReadStream(real);
+      source.on("error", reject);
+      res.on("close", () => source.destroy());
+      source.on("end", resolve);
+      source.pipe(res);
+    });
   };
 }

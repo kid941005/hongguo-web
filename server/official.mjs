@@ -126,8 +126,9 @@ export function createOfficial({ register, deriveContentKey } = {}) {
     const code = Number(root.code != null ? root.code : root.Code != null ? root.Code : 0);
     if (code !== 0) throw new Error("model 返回错误码 " + code);
     const data = root.data || {};
-    const entry = data[String(epId)] || Object.values(data)[0];
-    if (!entry || typeof entry !== "object") throw new Error("model 响应缺少条目");
+    // 只认本集条目：以前缺条目时静默回落到第一条，会把「第 30 集」播成「第 1 集」（review S7）。
+    const entry = data[String(epId)];
+    if (!entry || typeof entry !== "object") throw new Error("model 响应缺少本集条目");
     let model = entry.video_model;
     if (typeof model === "string") model = JSON.parse(model);
     if (!model || !Array.isArray(model.video_list) || !model.video_list.length)

@@ -575,6 +575,9 @@ export function createCatalog({ provider, sources }) {
   async function detail(sourceId, id) {
     const entry = entryOf(sourceId);
     if (entry.type === "builtin") {
+      // 内置源的 id 是纯数字分集/剧 id；不校验就把它拼进上游请求，
+      // 上游对 "__nope__" 这类值回 500，最终变成 502 + axios 英文（review D1/S3）。
+      if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
       let data;
       try {
         data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");

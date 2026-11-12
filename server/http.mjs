@@ -5,6 +5,7 @@ import { createStaticHandler } from "./static.mjs";
 import { createStreamHandler } from "./stream.mjs";
 import { transcodeToResponse, transcodeStats } from "./transcode.mjs";
 import { proxyMedia, proxyHls } from "./media.mjs";
+import { isPrivateHost } from "./net.mjs";
 
 const MAX_BODY = 3 * 1024 * 1024;
 const MAX_PAGE = 500;
@@ -68,7 +69,9 @@ function pageOf(q) {
 function requireToken(req, token, url) {
   const expected = Buffer.from("Bearer " + token);
   const candidates = [req.headers.authorization || ""];
-  const queryToken = url && url.searchParams.get("token");
+  // 查询参数鉴权只为「浏览器媒体请求带不了自定义头」这条路径存在：
+  // at 是前端自己的参数名，token 仅作老链接兼容（两者都不再被当作上游 token 转发）。
+  const queryToken = url && (url.searchParams.get("at") || url.searchParams.get("token"));
   if (queryToken) candidates.push("Bearer " + queryToken);
   const ok = candidates.some((value) => {
     const actual = Buffer.from(value);
@@ -77,12 +80,38 @@ function requireToken(req, token, url) {
   if (!ok) throw fail("UNAUTHORIZED", "服务访问口令不正确");
 }
 
+// 未设 TOKEN 的部署（本机自用最常见）不能让管理接口裸奔到公网：
+// 源导入会把脚本送进 vm 执行，等价于「谁能调谁就能跑代码」，因此这类写操作
+// 只允许内网/回环来源。Docker 端口映射后容器看到的对端是网桥地址（私有），不受影响。
+const ADMIN_WRITE = [/^\/api\/sources(?:\/|$)/, /^\/api\/cache\/clear$/, /^\/api\/alerts\/check$/];
+
+function isAdminWrite(pathname) {
+  return ADMIN_WRITE.some((pattern) => pattern.test(pathname));
+}
+
+function badMethod(allowed) {
+  const error = fail("BAD_METHOD", "Method not allowed");
+  error.allow = Array.from(allowed).join(", ");
+  return error;
+}
+
 // 认证接口的内存滑动窗口限流：默认每个 IP 每分钟 10 次，降低口令爆破风险。
 const RATE_WINDOW = 60 * 1000;
 const RATE_MAX = 10;
 const rateBuckets = new Map();
+// 放在反向代理/网关后面时，remoteAddress 永远是代理地址，所有用户会挤进同一个
+// 限流桶（一个人试错就把全站锁住）。X-Forwarded-For 可以被任意伪造，所以默认不采信，
+// 只有部署者显式设置 TRUST_PROXY=1 才取第一跳。
+const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || ""));
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const first = String((req.headers && req.headers["x-forwarded-for"]) || "").split(",")[0].trim();
+    if (first) return first;
+  }
+  return (req.socket && req.socket.remoteAddress) || "unknown";
+}
 function rateLimit(req) {
-  const ip = (req.socket && req.socket.remoteAddress) || "unknown";
+  const ip = clientIp(req);
   const now = Date.now();
   let bucket = rateBuckets.get(ip);
   if (!bucket || now - bucket.start >= RATE_WINDOW) {
@@ -100,7 +129,13 @@ function rateLimit(req) {
   }
 }
 
+// force=1 会对「全部追剧」立刻打上游（4 路并发），没有冷却就是一个按钮打挂上游；
+// 单次检查的条目也必须有上限，否则追剧几百部时一次请求要跑几分钟。
+const FORCE_COOLDOWN_MS = 60 * 1000;
+const FOLLOW_DUE_MAX = 20;
+
 export function createServer({ provider, sources, catalog, users = null, monitor = null, recommend = null, webDir, token = "", version = "0.0.0", maxStreams = 6 }) {
+  const forceCheckedAt = new Map();
   const serveStatic = createStaticHandler(webDir);
   const serveStream = createStreamHandler({ provider, limit: maxStreams });
 
@@ -229,8 +264,21 @@ export function createServer({ provider, sources, catalog, users = null, monitor
       const u = requireUser(ctx);
       const force = ctx.q.get("force") === "1";
       const now = Date.now();
+      if (force) {
+        const last = forceCheckedAt.get(u.id) || 0;
+        if (now - last < FORCE_COOLDOWN_MS) {
+          const error = fail("RATE_LIMITED", "追更检查过于频繁，请稍后再试");
+          error.retryAfter = Math.ceil((FORCE_COOLDOWN_MS - (now - last)) / 1000);
+          throw error;
+        }
+        forceCheckedAt.set(u.id, now);
+      }
       const follows = users.listFollows(u.id);
-      const due = follows.filter((fo) => force || !fo.lastChecked || now - fo.lastChecked >= 10 * 60 * 1000);
+      // 到期检查按「最久没查过的先查」，超出上限的留到下一轮，避免单请求超时。
+      const due = follows
+        .filter((fo) => force || !fo.lastChecked || now - fo.lastChecked >= 10 * 60 * 1000)
+        .sort((a, b) => (a.lastChecked || 0) - (b.lastChecked || 0))
+        .slice(0, FOLLOW_DUE_MAX);
       const updates = [];
       let cursor = 0;
       // 最多 4 路并发，避免追剧多时逐个串行拖到超时。
@@ -361,8 +409,9 @@ export function createServer({ provider, sources, catalog, users = null, monitor
     ["GET", /^\/api\/hls$/, async ({ req, res, q }) => {
       const target = q.get("u");
       if (!target) throw fail("BAD_INPUT", "缺少 u");
-      const accessToken = q.get("token") || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-      await proxyHls(req, res, { url: target, referer: q.get("r") || "", token: accessToken, ua: q.get("ua") || "" });
+      // 只转发「源自己在地址里声明的 token」（st），绝不把服务口令写进重写后的分片地址，
+      // 否则每片请求都会把口令送给第三方 CDN（review F1/S5）。
+      await proxyHls(req, res, { url: target, referer: q.get("r") || "", token: q.get("st") || "", ua: q.get("ua") || "" });
     }],
 
     // ---- 内置红果：服务端解密流 ----
@@ -388,19 +437,37 @@ export function createServer({ provider, sources, catalog, users = null, monitor
 
     if (token && url.pathname.startsWith("/api/")) requireToken(req, token, url);
 
+    // 没有口令时，管理写接口只对内网开放（见 ADMIN_WRITE 注释）。
+    if (
+      !token &&
+      url.pathname.startsWith("/api/") &&
+      !["GET", "HEAD"].includes(req.method) &&
+      isAdminWrite(url.pathname) &&
+      !isPrivateHost(req.socket && req.socket.remoteAddress)
+    ) {
+      throw fail("PROTECTED", "对外网开放的管理接口需要先设置 TOKEN 环境变量");
+    }
+
     let pathMatched = false;
+    const allowed = new Set();
     for (const [method, pattern, handler] of routes) {
       const match = pattern.exec(url.pathname);
       if (!match) continue;
       pathMatched = true;
+      if (method === "GET") {
+        allowed.add("GET");
+        allowed.add("HEAD");
+      } else {
+        allowed.add(method);
+      }
       // HEAD 视作 GET（Node 会自动丢弃响应体）
       if (method !== req.method && !(method === "GET" && req.method === "HEAD")) continue;
       ctx.params = match.slice(1);
       return handler(ctx);
     }
-    if (pathMatched) throw fail("BAD_METHOD", "Method not allowed");
+    if (pathMatched) throw badMethod(allowed);
     if (url.pathname.startsWith("/api/")) throw fail("NOT_FOUND", "接口不存在");
-    if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "Method not allowed");
+    if (!["GET", "HEAD"].includes(req.method)) throw badMethod(["GET", "HEAD"]);
     // 浏览器即使页面已声明 data: 图标仍会固定请求 /favicon.ico，这里用 PWA 图标兜底，避免每次刷新多一条 404。
     if (url.pathname === "/favicon.ico") return serveStatic(req, res, "/icons/icon-192.png");
     return serveStatic(req, res, url.pathname);

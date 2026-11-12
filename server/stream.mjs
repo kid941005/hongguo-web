@@ -5,7 +5,9 @@ const CHUNK = 1024 * 1024;
 // 同一集同一档位的取址去重计数（只统计，供 /api/metrics 观察效果）。
 const DEDUPE = { lookups: 0, shared: 0 };
 // 允许的清晰度参数：auto=最高可用档，compat=官网 360P 明文兜底，其余按档位名精确匹配。
-const QUALITIES = new Set(["auto", "1080p", "720p", "540p", "480p", "360p", "compat"]);
+// 导出给 http/transcode 复用：转码路径（?tc=1）也必须走同一份白名单，
+// 否则它成了绕过档位校验的后门（review S2）。
+export const QUALITIES = new Set(["auto", "1080p", "720p", "540p", "480p", "360p", "compat"]);
 
 function withTimeout(promise, ms, message) {
   let timer;
@@ -174,11 +176,26 @@ export function createStreamHandler({ provider, limit = 6 }) {
           : await withTimeout(stream.chunk(offset, Math.min(offset + CHUNK - 1, end)), 20000, "视频分块读取超时");
         if (res.destroyed) break;
         if (!res.write(chunk)) {
-          await new Promise((resolve) => {
-            const done = () => { res.off("drain", done); res.off("close", done); resolve(); };
-            res.once("drain", done);
-            res.once("close", done);
+          // 只连不读的客户端永远不会 drain：等太久就主动断开，否则并发槽位被永久占住（review S8）。
+          const drained = await new Promise((resolve) => {
+            let timer = null;
+            const finish = (ok) => {
+              if (timer) clearTimeout(timer);
+              res.off("drain", onDrain);
+              res.off("close", onClose);
+              resolve(ok);
+            };
+            const onDrain = () => finish(true);
+            const onClose = () => finish(false);
+            timer = setTimeout(() => {
+              finish(false);
+              res.destroy();
+            }, 30000);
+            if (timer.unref) timer.unref();
+            res.once("drain", onDrain);
+            res.once("close", onClose);
           });
+          if (!drained) break;
         }
       }
       res.end();

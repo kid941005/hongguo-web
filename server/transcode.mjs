@@ -11,9 +11,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fail } from "./errors.mjs";
+import { QUALITIES } from "./stream.mjs";
 
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const MAX_INPUT = Number(process.env.TRANSCODE_MAX_INPUT_BYTES || 96 * 1024 * 1024);
+// 转码是「整集读进内存 + 起一个 ffmpeg」，成本远高于直传：必须独立限并发。
+// 不设上限时，任何人循环请求 ?tc=1 就能把容器内存和 CPU 打满（review S2）。
+const MAX_CONCURRENT = Math.max(1, Number(process.env.TRANSCODE_MAX_CONCURRENT || 2) || 2);
+let active = 0;
 const STATS = { transcodes: 0, failures: 0, lastError: "", lastAt: 0, bytesIn: 0, bytesOut: 0 };
 let availability = null;
 
@@ -30,7 +35,7 @@ export function transcodeAvailable() {
 }
 
 export function transcodeStats() {
-  return { available: transcodeAvailable(), ...STATS };
+  return { available: transcodeAvailable(), active, limit: MAX_CONCURRENT, ...STATS };
 }
 
 function boxes(buf, start, end) {
@@ -157,7 +162,7 @@ async function readAll(stream) {
   const CH = 1024 * 1024;
   const total = Number(stream.total) || 0;
   if (!total) throw new Error("分片总长为 0");
-  if (total > MAX_INPUT) throw new Error("该集文件过大（" + total + " 字节），超出转码上限");
+  if (total > MAX_INPUT) throw fail("SOURCE_OOM", "该集文件过大，超出转码上限（" + MAX_INPUT + " 字节）");
   const parts = [];
   for (let off = 0; off < total; off += CH) {
     parts.push(await stream.chunk(off, Math.min(off + CH - 1, total - 1)));
@@ -178,14 +183,29 @@ export async function transcodeToResponse({ provider, epId, quality, req, res, l
     );
   }
   if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
+  if (!QUALITIES.has(String(quality))) throw fail("BAD_INPUT", "清晰度参数无效");
+  if (active >= MAX_CONCURRENT) throw fail("BUSY", "同时转码数已达上限（" + MAX_CONCURRENT + "），请稍后重试");
   const stream = await provider.stream(epId, { quality });
   if (req.method === "HEAD") {
     res.writeHead(200, { "content-type": "video/mp4", "cache-control": "no-store", "x-stream-transcode": "1" });
     return res.end();
   }
+  active++;
+  try {
+    return await transcodeNow({ stream, epId, quality, res, logger });
+  } finally {
+    active--;
+  }
+}
+
+async function transcodeNow({ stream, epId, quality, res, logger }) {
   const buf = await readAll(stream);
   const layout = analyse(buf);
-  if (!/^(vvc1|bv2C|hvc1)$/.test(layout.video.entry)) throw new Error("视频轨不是 VVC");
+  // 注意 hvc1 必须放行：红果的 VVC 流在 stsd 里写的就是 hvc1（见文件头注释第 1 条），
+  // 按 4CC 判断会把真正需要转码的流挡在门外。hev1 才是不需要转码的真 HEVC。
+  if (!/^(vvc1|bv2C|hvc1)$/.test(layout.video.entry)) {
+    throw fail("CODEC_UNSUPPORTED", "该档位不是 H.266/VVC，无需服务端转码");
+  }
   const annex = annexB(buf, layout.video);
   const audio = audioOnlyMp4(buf, layout);
   STATS.bytesIn += buf.length;
@@ -223,7 +243,7 @@ export async function transcodeToResponse({ provider, epId, quality, req, res, l
       cleanup();
       STATS.failures += 1;
       STATS.lastError = String(error.message || error);
-      reject(fail("UPSTREAM_ERROR", "转码进程启动失败：" + STATS.lastError));
+      reject(fail("UPSTREAM_ERROR", "转码进程启动失败"));
     });
     child.stdout.on("data", (chunk) => {
       if (!started) {
@@ -251,7 +271,7 @@ export async function transcodeToResponse({ provider, epId, quality, req, res, l
       if (!started) {
         STATS.failures += 1;
         STATS.lastError = stderr || "ffmpeg 退出码 " + code;
-        reject(fail("UPSTREAM_ERROR", "转码失败：" + STATS.lastError.slice(0, 300)));
+        reject(fail("UPSTREAM_ERROR", "转码失败（详见服务端日志）"));
         return;
       }
       if (!res.writableEnded) res.end();
