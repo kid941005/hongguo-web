@@ -11,7 +11,7 @@
     rate: 1, quality: -1, levels: [], qualityOptions: [], qualityNote: '',
     qualityKey: '', playKind: '', hevcCap: null, hevcFallback: false, silentSeek: false,
     // A4：起播/切档时间 + 同档重试一次性标志（10s 内解码失败先原样重载一次）
-    switchAt: 0, switchRetried: false,
+    switchAt: 0, switchRetried: false, switching: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
     user: null, favs: [], follows: []
@@ -1024,6 +1024,8 @@
     state.switchRetried = false;
     state.pendingSeek = Math.floor(at);
     state.silentSeek = at > 3;
+    state.switching = true;
+    syncQualityParam(o.key);
     hidePlayerError();
     v.src = authUrl(o.url);
     try { v.load(); } catch (e) {}
@@ -1062,6 +1064,8 @@
   }
   function updateQualityBtn() {
     var btn = $('btnQuality'); if (!btn) return;
+    // 切档期间按钮显示进行中：换 src 到首帧就绪之间有几百毫秒空窗，没有反馈会像点了没反应。
+    if (state.switching) { btn.textContent = '切换中…'; btn.classList.add('on'); return; }
     var multi = (state.qualityOptions || []).length > 1;
     var chosen = '';
     if (state.playKind === 'native' && state.qualityKey) {
@@ -1147,6 +1151,7 @@
     }
     if (o.levelIndex != null && state.hls && (state.qualityOptions || []).length > 1) {
       state.quality = o.levelIndex;
+      state.switching = true;
       try { state.hls.currentLevel = o.levelIndex; } catch (e) {}
       updateQualityBtn();
       toast('清晰度：' + (o.levelIndex < 0 ? '自动' : o.label));
@@ -1249,7 +1254,11 @@
     clearPlayWatchdog();
     playWatchdog = setTimeout(function () {
       var v = $('video');
-      if (v && v.readyState < 1) showPlayerError('播放加载超时（8 秒未响应），可能是当前数据源受限，请换源或重试。');
+      if (v && v.readyState < 1) {
+        // 超时可能连 error 事件都不来，这里兜底把「切换中…」清掉，别让按钮永远卡住。
+        if (state.switching) { state.switching = false; updateQualityBtn(); }
+        showPlayerError('播放加载超时（8 秒未响应），可能是当前数据源受限，请换源或重试。');
+      }
     }, 8000);
   }
   function onVideoError() {
@@ -1294,13 +1303,21 @@
     state.playKind = type === 'hls' ? 'hls' : 'native';
     state.switchAt = Date.now();
     state.switchRetried = false;
+    state.switching = false;
     if (qualityInfo && Array.isArray(qualityInfo.options) && qualityInfo.options.length) {
       state.qualityOptions = qualityInfo.options.map(function (o) {
         return { key: o.key, label: o.label, height: o.height, codec: o.codec || '', url: o.url || '', levelIndex: null };
       });
       state.qualityNote = qualityInfo.note || '';
-      // 浏览器不支持 HEVC 时最高档必然解不出来，直接起播 360P 兼容线路，省掉一次失败重试。
-      if (state.playKind === 'native' && hasHevcOption() && !hevcSupported()) {
+      // 地址栏里的 ?q= 是用户上次选的档位（切档时写入），刷新/分享回来仍按它起播。
+      var wantQ = urlQualityParam();
+      var wantOpt = wantQ ? optionByKey(wantQ) : null;
+      if (wantOpt && wantOpt.url && wantOpt.codec !== 'vvc' && !(wantOpt.codec === 'hevc' && !hevcSupported())) {
+        url = wantOpt.url;
+        state.qualityKey = wantOpt.key;
+        state.hevcFallback = wantOpt.key === 'compat';
+      } else if (state.playKind === 'native' && hasHevcOption() && !hevcSupported()) {
+        // 浏览器不支持 HEVC 时最高档必然解不出来，直接起播 360P 兼容线路，省掉一次失败重试。
         var compat = optionByKey('compat');
         if (compat && compat.url) {
           url = compat.url;
@@ -1311,6 +1328,7 @@
       }
     }
     if (state.playKind === 'native' && !state.qualityKey && optionByKey('auto')) state.qualityKey = 'auto';
+    syncQualityParam(state.playKind === 'native' ? state.qualityKey : '');
     url = authUrl(url);
     updateResBadge();
     updateQualityBtn();
@@ -1338,6 +1356,7 @@
           updateQualityBtn();
         });
         hls.on(window.Hls.Events.LEVEL_SWITCHED, function () {
+          if (state.switching) state.switching = false;
           updateResBadge(); updateQualityBtn();
         });
         var recovered = false;
@@ -1451,6 +1470,8 @@
       }
       state.pendingSeek = 0;
       state.silentSeek = false;
+      if (state.switching) { state.switching = false; updateQualityBtn(); }
+      prefetchNext();
     });
     v.addEventListener('timeupdate', function () {
       if (!state.histKey) return;
@@ -1490,6 +1511,7 @@
       if (!err) return;
       // 换源/切档时我们自己 removeAttribute('src')+load() 也会触发 ABORTED，不是真故障。
       if (err.code === 1) return;
+      if (state.switching) { state.switching = false; updateQualityBtn(); }
       if (state.playKind !== 'native') return;
       var label = mediaErrLabel(err.code);
       // 第一级：刚起播/刚切档 10 秒内失败，先原样重载一次同档（一次性标志，避免失败循环）。
@@ -1549,6 +1571,82 @@
     }
   }
 
+  // 清晰度写进地址栏（?quality=compat）：刷新、前进后退、把链接发给别人时还是这一档。
+  // 注意不能叫 q——?q= 是搜索关键词（bootFromQuery 会拿它直接 doSearch）。其它参数原样保留。
+  function syncQualityParam(key) {
+    try {
+      var u = new URL(location.href);
+      var cur = u.searchParams.get('quality') || '';
+      if (cur === (key || '')) return;
+      if (key) u.searchParams.set('quality', key); else u.searchParams.delete('quality');
+      history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+    } catch (e) {}
+  }
+  function urlQualityParam() {
+    try { return new URLSearchParams(location.search).get('quality') || ''; } catch (e) { return ''; }
+  }
+
+  // ---- 下一集预取 ----
+  // 省掉换集时「上游取址 + 首块解密」的等待（红果那条链通常 300~800ms）。
+  // 边界：只预热到首帧就断开下载，不偷偷吃掉整集流量；最多记 6 条已预热，超出淘汰最旧。
+  var PREFETCH_MAX = 6;
+  var prefetchCache = new Map();
+  var prefetchEl = null;
+  var prefetchKey = '';
+
+  function prefetchNext() {
+    if ($('player').classList.contains('hidden')) return;
+    var d = state.detail; if (!d) return;
+    var line = d.lines[state.line]; if (!line) return;
+    var next = line.episodes[(state.epIdx || 0) + 1]; if (!next) return;
+    // 用户开了省流量模式就别预取。
+    if (navigator.connection && navigator.connection.saveData) return;
+    var key = state.viewSource + '|' + d.id + '|' + state.line + '|' + ((state.epIdx || 0) + 1);
+    if (prefetchCache.has(key) || prefetchKey === key) return;
+    prefetchKey = key;
+    api('/api/play', { source: state.viewSource, flag: line.flag, id: next.id }).then(function (r) {
+      if (!r || !r.url) return;
+      // HLS 要 hls.js 解析清单才有意义，这里只预热直链（红果/西饭/牛牛这类 mp4）。
+      if (r.type === 'hls') { prefetchCache.set(key, { at: Date.now() }); trimPrefetch(); return; }
+      if (!prefetchEl) {
+        prefetchEl = document.createElement('video');
+        prefetchEl.preload = 'auto';
+        prefetchEl.muted = true;
+        prefetchEl.playsInline = true;
+        prefetchEl.setAttribute('aria-hidden', 'true');
+        prefetchEl.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+        prefetchEl.addEventListener('loadeddata', function () {
+          var k = prefetchEl._hgKey;
+          try { prefetchEl.removeAttribute('src'); prefetchEl.load(); } catch (e) {}
+          if (k) { prefetchCache.set(k, { at: Date.now() }); trimPrefetch(); }
+        });
+        document.body.appendChild(prefetchEl);
+      }
+      // 预取要用「下一集真正会播的那一档」：默认 auto 是 HEVC，不支持 HEVC 的浏览器预热了也播不了。
+      var purl = r.url;
+      if (r.quality && Array.isArray(r.quality.options) && r.quality.options.length) {
+        var pick = null;
+        if (state.qualityKey) {
+          pick = r.quality.options.filter(function (o) { return o.key === state.qualityKey; })[0] || null;
+        }
+        if (!pick && !hevcSupported()) {
+          pick = r.quality.options.filter(function (o) { return o.codec === 'h264'; })[0] || null;
+        }
+        if (pick && pick.url) purl = pick.url;
+      }
+      prefetchEl._hgKey = key;
+      prefetchEl.src = authUrl(purl);
+    }).catch(function () { prefetchKey = ''; });
+  }
+  function trimPrefetch() {
+    while (prefetchCache.size > PREFETCH_MAX) prefetchCache.delete(prefetchCache.keys().next().value);
+  }
+  function stopPrefetch() {
+    prefetchKey = '';
+    if (!prefetchEl) return;
+    try { prefetchEl.removeAttribute('src'); prefetchEl.load(); } catch (e) {}
+  }
+
   function closePlayer() {
     var v = $('video');
     closeQualityMenu();
@@ -1557,7 +1655,9 @@
     saveProgress(v);
     try { v.pause(); } catch (e) {}
     v.removeAttribute('src'); try { v.load(); } catch (e) {}
+    stopPrefetch();
     destroyHls();
+    state.switching = false;
     $('player').classList.add('hidden');
   }
 
@@ -1969,7 +2069,9 @@
     loadRecommend: loadRecommend, loadForYou: loadForYou, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
     openAuth: openAuth, logout: logout, refreshMe: refreshMe, checkUpdates: checkUpdates,
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
-    mergeServerHistory: mergeServerHistory, closeMenus: closeMenus
+    mergeServerHistory: mergeServerHistory, closeMenus: closeMenus,
+    selectQuality: selectQuality, switchNativeQuality: switchNativeQuality,
+    prefetch: { cache: prefetchCache, el: function () { return prefetchEl; }, next: prefetchNext, trim: trimPrefetch }
   };
 
   // ---- 启动 ----
