@@ -9,7 +9,7 @@
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [], qualityOptions: [], qualityNote: '',
-    qualityKey: '', playKind: '', hevcCap: null, hevcFallback: false, silentSeek: false,
+    qualityKey: '', playKind: '', hevcCap: null, hevcFallback: false, silentSeek: false, hevcWarned: false,
     // A4：起播/切档时间 + 同档重试一次性标志（10s 内解码失败先原样重载一次）
     switchAt: 0, switchRetried: false, switching: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
@@ -27,28 +27,47 @@
   var reqSeq = 0;
   function nextReq() { return ++reqSeq; }
   function isCurrent(n) { return n === reqSeq; }
+  // 播放请求独立序号（不复用视图令牌）：连点两集时只让最后一次的响应落地，
+  // 又不至于把正在翻页的列表请求判成过期。
+  var playSeq = 0;
   // 列表类请求的超时：源侧挂住时也要让「搜索中…/加载中…」有机会收尾，不能无限转。
   var LIST_TIMEOUT_MS = 15000;
 
   // 访问口令：服务端设了 TOKEN 时，前端可用 ?token=xxx 打开一次（会记住），之后自动带上
   var TOKEN_KEY = 'hg_token', tokenCache = null;
+  // 口令既能用 ?token= 打开一次（分享链接），也能用 ?at=（媒体/清单地址专用，见 authUrl）。
+  // 读入后立刻从地址栏抹掉：否则口令会留在历史记录、书签、截图和 Referer 里。
+  function stripTokenFromUrl() {
+    try {
+      var u = new URL(location.href);
+      var changed = false;
+      ['token', 'at'].forEach(function (k) {
+        if (u.searchParams.has(k)) { u.searchParams.delete(k); changed = true; }
+      });
+      if (changed) history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+    } catch (e) {}
+  }
   function readToken() {
     if (tokenCache !== null) return tokenCache;
-    var fromQuery = new URLSearchParams(location.search).get('token');
+    var qs = new URLSearchParams(location.search);
+    var fromQuery = qs.get('token') || qs.get('at');
     if (fromQuery) {
       tokenCache = fromQuery;
       try { localStorage.setItem(TOKEN_KEY, fromQuery); } catch (e) {}
+      stripTokenFromUrl();
       return tokenCache;
     }
     try { tokenCache = localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { tokenCache = ''; }
     return tokenCache;
   }
   // 给同源的媒体/流地址补上访问口令：<video>/<img>/hls.js 无法自定义请求头，只能走查询参数。
+  // 参数名必须用 at 而不是 token：token 是「上游源自己的参数」，服务端会把它原样转发进
+  // 重写后的切片地址，两者同名等于把服务口令交给第三方 CDN。
   function authUrl(u) {
     if (!u || u.indexOf('/api/') !== 0) return u;
     var token = readToken();
-    if (!token || u.indexOf('token=') !== -1) return u;
-    return u + (u.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(token);
+    if (!token || u.indexOf('at=') !== -1) return u;
+    return u + (u.indexOf('?') === -1 ? '?' : '&') + 'at=' + encodeURIComponent(token);
   }
   function headers(extra) {
     var out = { 'Accept': 'application/json' };
@@ -89,7 +108,18 @@
         clearTimer();
         return r.text().then(function (text) {
           var body = {};
-          if (text) { try { body = JSON.parse(text); } catch (e) { body = { error: text.slice(0, 200) }; } }
+          if (text) {
+            try { body = JSON.parse(text); }
+            catch (e) {
+              // 200 却不是 JSON：多半是反向代理/网关塞了一张 HTML 错误页。
+              // 不能伪造一个「带 error 字段的成功体」，否则上层会把它当正常数据渲染成空列表。
+              if (r.ok) {
+                var be = new Error('服务返回了非 JSON 响应（HTTP ' + r.status + '）');
+                be.code = 'BAD_RESPONSE'; be.status = r.status; throw be;
+              }
+              body = { error: text.slice(0, 200) };
+            }
+          }
           if (!r.ok) {
             if (left > 0 && canRetry && (r.status === 502 || r.status === 504)) return attempt(left - 1);
             var err = new Error(body && body.error || ('HTTP ' + r.status));
@@ -181,6 +211,7 @@
 
   // ---- 账号 / 多设备同步 ----
   var UTOKEN_KEY = 'hg_user_token', authMode = 'login';
+  // 密码字段名拆开拼：部分浏览器的自动填充/静态扫描会按字面量识别，拆开可避免误触发。
   var PW_FIELD = 'pass' + 'word'; // 避免字面量被误处理
   function userToken() { try { return localStorage.getItem(UTOKEN_KEY) || ''; } catch (e) { return ''; } }
   function setUserToken(t) { try { if (t) localStorage.setItem(UTOKEN_KEY, t); else localStorage.removeItem(UTOKEN_KEY); } catch (e) {} }
@@ -326,7 +357,10 @@
     }).catch(function (e) { toast(e.message); });
   }
   function removeFav(it, silent) {
-    return deleteJson('/api/me/favorites/' + encodeURIComponent(it.source || '') + '/' + encodeURIComponent(it.id)).then(function () {
+    // source 为空时 URL 会出现空路径段（/api/me/favorites//id），后端正则匹配不上直接 404。
+    var src = it.source || state.viewSource || (state.source === '__all' ? '' : state.source);
+    if (!src) { toast('缺少数据源信息，无法取消收藏'); return Promise.resolve(); }
+    return deleteJson('/api/me/favorites/' + encodeURIComponent(src) + '/' + encodeURIComponent(it.id)).then(function () {
       var k = favKey(it.source, it.id);
       state.favs = (state.favs || []).filter(function (f) { return favKey(f.source, f.id) !== k; });
       updateDetailActions(); if (!$('favModal').classList.contains('hidden')) renderFavs();
@@ -354,7 +388,9 @@
     }).catch(function (e) { toast(e.message); });
   }
   function removeFollow(it, silent) {
-    return deleteJson('/api/me/follows/' + encodeURIComponent(it.source || '') + '/' + encodeURIComponent(it.id)).then(function () {
+    var src = it.source || state.viewSource || (state.source === '__all' ? '' : state.source);
+    if (!src) { toast('缺少数据源信息，无法取消追更'); return Promise.resolve(); }
+    return deleteJson('/api/me/follows/' + encodeURIComponent(src) + '/' + encodeURIComponent(it.id)).then(function () {
       var k = favKey(it.source, it.id);
       state.follows = (state.follows || []).filter(function (f) { return favKey(f.source, f.id) !== k; });
       updateDetailActions(); if (!$('followModal').classList.contains('hidden')) renderFollows();
@@ -368,19 +404,34 @@
     // 「历史」菜单收起时用一个小圆点提示有新集
     var dot = $('menuHistDot'); if (dot) dot.classList.toggle('hidden', !(n > 0));
   }
+  // 两个触发源（定时轮询 + 打开追更面板）可能同时打进来；共用一个在飞 Promise，
+  // 避免重复请求上游、也避免两次结果互相覆盖徽标。
+  var updatesInflight = null;
   function checkUpdates(force, silent) {
     if (!state.user) return Promise.resolve([]);
+    if (updatesInflight) return updatesInflight;
+    updatesInflight = fetchUpdates(force, silent).then(function (ups) {
+      updatesInflight = null;
+      return ups;
+    }, function () {
+      updatesInflight = null;
+      return [];
+    });
+    return updatesInflight;
+  }
+  function fetchUpdates(force, silent) {
     return api('/api/me/follows/updates', force ? { force: 1 } : {}).then(function (r) {
       if (r.follows) state.follows = r.follows;
       var ups = r.updates || [];
+      // 徽标按本次结果无条件刷新：没有更新时必须把旧数字清掉，
+      // 否则「3 集更新」会一直挂在顶栏上（后台轮询只会返回增量）。
+      var total = 0;
+      ups.forEach(function (u) { total += (u.added || 0); });
+      setFollowBadge(total);
       if (ups.length) {
-        var total = 0;
-        ups.forEach(function (u) { total += (u.added || 0); });
-        setFollowBadge(total);
         toast('🔔 ' + ups.map(function (u) { return '《' + (u.title || u.id) + '》更新 ' + u.added + ' 集'; }).join('；'));
         if (!$('followModal').classList.contains('hidden')) renderFollows();
       } else if (force && !silent) {
-        setFollowBadge(0);
         toast('追剧暂无更新');
       }
       return ups;
@@ -428,7 +479,7 @@
     }
     items.forEach(function (it) {
       var row = document.createElement('div'); row.className = 'histrow';
-      var img = document.createElement('img'); img.className = 'histcover'; img.loading = 'lazy';
+      var img = document.createElement('img'); img.className = 'histcover'; img.referrerPolicy = 'no-referrer'; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
       img.src = posterUrl(it.cover); img.onerror = function () { img.src = PLACEHOLDER; };
       row.appendChild(img);
       var info = document.createElement('div'); info.className = 'histinfo';
@@ -560,7 +611,7 @@
     // 卡片带上是哪条数据、来自哪个源：便于排障与快速切源后的结果核对
     card.dataset.id = item.id == null ? '' : String(item.id);
     card.dataset.source = item.source || '';
-    var img = document.createElement('img'); img.className = 'poster'; img.loading = 'lazy';
+    var img = document.createElement('img'); img.className = 'poster'; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
     img.alt = item.title || '';
     var original = item.cover || '';
     img.src = posterUrl(original);
@@ -604,15 +655,17 @@
     else {
       // 翻页去重兜底：源忽略 page 参数时会把同一批反复返回，已经渲染过的 id 不再追加，
       // 否则页面会出现重复卡片，看起来像「同一页被加了两次」。
+      // 去重键必须带 source：聚合搜索下不同源可能撞 id，只按 id 会把合法结果误删。
       var seen = {};
       Array.prototype.forEach.call(grid.children, function (c) {
-        if (c && c.dataset && c.dataset.id) seen[c.dataset.id] = 1;
+        if (c && c.dataset && c.dataset.id) seen[(c.dataset.source || '') + '|' + c.dataset.id] = 1;
       });
       items = items.filter(function (it) {
         var key = it && it.id != null ? String(it.id) : '';
         if (!key) return true;
-        if (seen[key]) return false;
-        seen[key] = 1;
+        var k = (it.source || '') + '|' + key;
+        if (seen[k]) return false;
+        seen[k] = 1;
         return true;
       });
     }
@@ -768,7 +821,12 @@
     }).catch(function (e) {
       if (viewSeq === reqSeq) state.page -= 1;
       done();
-      if (viewSeq === reqSeq) { state.failedAction = loadMore; showError(e); }
+      if (viewSeq === reqSeq) {
+        state.failedAction = loadMore;
+        // 翻页失败时把「加载更多」还回去，否则按钮被藏起来后只能靠滚动或重进页面重试。
+        if ($('grid').children.length) $('btnMore').classList.remove('hidden');
+        showError(e);
+      }
     });
   }
 
@@ -973,8 +1031,18 @@
         g.hasMore = (incoming.length && !!r.hasMore && !samePage);
         g.fallback = !!r.fallback;
         if (searchNote(r)) g.note = g.name + '：' + searchNote(r);
-        g.count += incoming.length;
-        g.items = (g.items || []).concat(incoming);
+        // 只在真正新增时才累加：同一源返回重复条目（换页不换内容）会让「共 N 条」
+        // 比列表实际条数多，页脚与提示条就对不上了。
+        var seen = {};
+        (g.items || []).forEach(function (it) { seen[(it.source || '') + '|' + it.id] = 1; });
+        var fresh = incoming.filter(function (it) {
+          var key = (it.source || '') + '|' + it.id;
+          if (seen[key]) return false;
+          seen[key] = 1;
+          return true;
+        });
+        g.count += fresh.length;
+        g.items = (g.items || []).concat(fresh);
         if (incoming.length) renderItems(incoming, true);
       }).catch(function (e) {
         if (viewSeq !== reqSeq) return;
@@ -987,7 +1055,13 @@
       });
     });
     return Promise.all(jobs).then(function () {
-      if (viewSeq !== reqSeq) return { attempted: attempted, failed: failed };
+      if (viewSeq !== reqSeq) {
+        // 视图已被切走：本次聚合的渲染全部作废，但 loadingMore 必须复位，
+        // 否则它永远停在 true，之后所有翻页点击都会被开头的守卫吞掉。
+        state.loadingMore = false;
+        setAutoMore(false);
+        return { attempted: attempted, failed: failed };
+      }
       state.searching = false;
       state.page = groups.reduce(function (n, g) { return Math.max(n, g.page || 0); }, 0);
       state.hasMore = groups.some(function (g) { return g.hasMore; });
@@ -1020,7 +1094,7 @@
     state.hasMore = false;
     $('chips').textContent = ''; state.items = []; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
     setEmptyState('搜索中…');
-    if (cur() === '__all') { startAggSearch(q, false); return; }
+    if (cur() === '__all') { state.failedAction = retryCurrent; startAggSearch(q, false); return; }
     state.aggregate = false; state.aggGroups = [];
     // P1(#3)：搜索结束（成功/失败/超时）必须清掉「搜索中…」占位，并给出明确状态。
     api('/api/search', { source: cur(), q: q, page: 1 }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
@@ -1050,12 +1124,15 @@
   }
 
   function openDetail(id, src) {
+    // 取视图令牌：连点两部剧时，慢响应晚到会被判过期丢弃，避免「点 A 显示 B」。
+    var seq = nextReq();
     state.viewSource = src || (state.source === '__all' ? '' : cur());
     state.detail = null;
     setView('detail');
     $('dTitle').textContent = '加载中…'; $('dMeta').textContent = ''; $('dDesc').textContent = ''; $('dTags').textContent = '';
     $('dCover').src = PLACEHOLDER; $('dEps').textContent = ''; $('dLines').textContent = '';
     api('/api/detail', { source: state.viewSource, id: id }).then(function (d) {
+      if (!isCurrent(seq)) return;
       state.detail = d; state.line = 0;
       if (d.source) state.viewSource = d.source;
       $('dTitle').textContent = d.title || '未命名';
@@ -1076,6 +1153,7 @@
       if (pp !== null && pp !== undefined && !(pr && pr.id === d.id)) playEpisode(0, pp, 0);
       window.scrollTo(0, 0);
     }).catch(function (e) {
+      if (!isCurrent(seq)) return;
       state.pendingResume = null; state.pendingPlay = null;
       $('dTitle').textContent = '打开失败';
       showError(e);
@@ -1112,9 +1190,15 @@
     });
   }
 
+  // 当前集高亮统一用 .current（renderEps 也用这一套），旧的 .active 会和历史渲染出的
+  // .current 同时存在，出现「两集都是当前集」。已看集同步用 .seen。
   function markActiveEp(lineIdx, epIdx) {
     var kids = $('dEps').children;
-    for (var i = 0; i < kids.length; i++) kids[i].classList.toggle('active', i === epIdx && state.line === lineIdx);
+    var sameLine = state.line === lineIdx;
+    for (var i = 0; i < kids.length; i++) {
+      kids[i].classList.toggle('current', sameLine && i === epIdx);
+      kids[i].classList.toggle('seen', sameLine && i < epIdx);
+    }
   }
 
   function playEpisode(lineIdx, epIdx, startAt, auto) {
@@ -1129,13 +1213,19 @@
     histTouch({
       source: state.viewSource, id: d.id, title: d.title, cover: d.cover,
       lineIdx: lineIdx, lineName: line.name, epIdx: epIdx, epName: ep.name,
-      pos: Math.max(0, Math.floor(startAt || 0)), dur: 0
+      // 时长沿用历史里已有的值：换集时写 0 会把续播条百分比和「剩余 xx 分钟」全部打乱。
+      pos: Math.max(0, Math.floor(startAt || 0)),
+      dur: (histGet(state.viewSource, d.id) || {}).dur || 0
     });
     updateResumeBar(d);
     if (!autoNext) toast('正在解析播放地址…');
+    var mySeq = ++playSeq;
     api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id }).then(function (r) {
+      // 过期响应（用户又点了别的集/关了播放器）直接丢弃，避免「点 A 播 B」。
+      if (mySeq !== playSeq || state.detail !== d) return;
       openPlayer(r.url, r.type, startAt, autoNext, r.quality);
     }).catch(function (e) {
+      if (mySeq !== playSeq || state.detail !== d) return;
       var msg = (e && e.message) || '未知错误';
       if (autoNext) toast('下一集播放失败：' + msg);
       else { toast('播放失败：' + msg); showPlayerError(msg); }
@@ -1199,26 +1289,8 @@
   // 用户也可以用 localStorage hg_hevc=1/0 手动覆盖（例如装了 HEVC 扩展的 Edge）。
   var HEVC_KEY = 'hg_hevc';
   var HEVC_CODECS = ['video/mp4; codecs="hvc1.1.6.L120.90"', 'video/mp4; codecs="hev1.1.6.L120.90"'];
-  function hevcSupported() {
-    try {
-      var forced = localStorage.getItem(HEVC_KEY);
-      if (forced === '1') return true;
-      if (forced === '0') return false;
-    } catch (e) { /* 隐私模式 */ }
-    if (state.hevcCap != null) return state.hevcCap;
-    var ok = false;
-    try {
-      if (window.MediaSource && window.MediaSource.isTypeSupported) {
-        ok = HEVC_CODECS.some(function (c) { return window.MediaSource.isTypeSupported(c); });
-      }
-      if (!ok) {
-        var probe = document.createElement('video');
-        ok = !!(probe.canPlayType && HEVC_CODECS.some(function (c) { return probe.canPlayType(c) === 'probably'; }));
-      }
-    } catch (e) { ok = false; }
-    state.hevcCap = ok;
-    return ok;
-  }
+  // 只有一份实现：统一走 probeHevcCap，避免两处判定逻辑分叉（一处 some、一处只看首个 codec）。
+  function hevcSupported() { return probeHevcCap(false); }
   function optionByKey(key) {
     var opts = state.qualityOptions || [];
     for (var i = 0; i < opts.length; i++) if (opts[i].key === key) return opts[i];
@@ -1239,7 +1311,7 @@
     else {
       try {
         if (window.MediaSource && window.MediaSource.isTypeSupported) {
-          ok = window.MediaSource.isTypeSupported(HEVC_CODECS[0]);
+          ok = HEVC_CODECS.some(function (c) { return window.MediaSource.isTypeSupported(c); });
         }
       } catch (e) { ok = false; }
       if (!ok) {
@@ -1575,6 +1647,9 @@
   }
   function onVideoError() {
     var v = $('video'); if (!v || !state.detail) return;
+    // 直链（native）有自己的三级降级阶梯（见 bindPlayerEvents），由它给出具体原因；
+    // 这里只管 HLS 等其它播放方式，否则阶梯刚决定「先重试一次」，这条又立刻弹一句通用失败。
+    if (state.playKind === 'native') return;
     var code = v.error ? v.error.code : 0;
     var msg = code === 4
       ? '视频源不可用或格式不受支持（MEDIA_ERR_SRC_NOT_SUPPORTED），可能是当前数据源受限，请换源或重试。'
@@ -1611,6 +1686,7 @@
     state.qualityNote = '';
     state.qualityKey = '';
     state.hevcFallback = false;
+    state.hevcWarned = false;   // 每次起播/换剧都允许再提示一次「最高档解不了，已换档」
     state.silentSeek = false;
     state.playKind = type === 'hls' ? 'hls' : 'native';
     state.switchAt = Date.now();
@@ -1796,6 +1872,9 @@
     return fetch(url, { headers: { Range: 'bytes=0-1' }, cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
       .then(function (r) {
         var status = r.status;
+        // 只有 206 才去读那 1 字节；上游/代理忽略 Range 回 200 时立刻掐断连接，
+        // 否则会把整集视频读进内存（4 秒 abort 只能兜时间，流量已经花掉了）。
+        if (status !== 206) { try { if (r.body) r.body.cancel(); } catch (e) {} return status; }
         return r.arrayBuffer().then(function () { return status; }, function () { return status; });
       })
       .then(function (status) { return { ok: status === 200 || status === 206, status: status }; })
@@ -1998,7 +2077,8 @@
     if (prefetchCache.has(key) || prefetchKey === key) return;
     prefetchKey = key;
     api('/api/play', { source: state.viewSource, flag: line.flag, id: next.id }).then(function (r) {
-      if (!r || !r.url) return;
+      // 取址失败要回滚占位 key，否则这一集之后永远被 prefetchKey === key 拦住，再也预取不到。
+      if (!r || !r.url) { prefetchKey = ''; return; }
       // HLS 要 hls.js 解析清单才有意义，这里只预热直链（红果/西饭/牛牛这类 mp4）。
       if (r.type === 'hls') { prefetchCache.set(key, { at: Date.now() }); trimPrefetch(); return; }
       if (!prefetchEl) {
@@ -2042,6 +2122,8 @@
 
   function closePlayer() {
     var v = $('video');
+    // 关掉播放器后，仍在路上的 /api/play 响应不应再把播放器打开。
+    playSeq++;
     closeQualityMenu();
     hidePlayerError();
     clearDiag();
@@ -2094,8 +2176,10 @@
     postJson('/api/sources/import', { url: url || undefined, code: url ? undefined : code }).then(function (res) {
       $('impMsg').textContent = '导入成功：' + res.source.name + '（v' + res.source.version + '）';
       toast('已导入源：' + res.source.name);
-      // 导入后面板里也要立刻出现新源，否则用户得关掉重开才看得到（下拉/首页已更新的状态会对不上）。
-      loadSources().then(function () { state.source = res.source.id; $('sourceSelect').value = state.source; refreshManage(); loadHome(); });
+      // 导入只写文件，不会自动成为当前源：这里显式切过去，否则刷新页面又退回原来的源。
+      setActiveSource(res.source.id)
+        .then(function () { refreshManage(); })
+        .catch(function (e) { toast((e && e.message) || '导入后切换源失败'); });
       setTimeout(closeImport, 700);
     }).catch(function (e) {
       $('impMsg').className = 'impmsg err';
@@ -2308,7 +2392,8 @@
       state.source = id;
       $('sourceSelect').value = id;
       closeMenus();
-      return loadSources().then(loadHome);
+      // loadSources 失败不该变成 unhandled rejection；loadHome 自己会把错误显示出来。
+      return loadSources().catch(function () {}).then(loadHome);
     });
   }
 
@@ -2398,7 +2483,8 @@
   $('btnPlayerSwitch').addEventListener('click', switchPlaybackSource);
   $('btnPlayerFallback').addEventListener('click', useFallback);
   $('video').addEventListener('error', onVideoError);
-  $('video').addEventListener('loadedmetadata', hidePlayerError);
+  // 只绑 playing：loadedmetadata 只代表「元数据到了」，此时解码仍可能失败，
+  // 绑在它上面会把刚弹出的错误横幅立刻收起来（黑屏却没有任何提示）。
   $('video').addEventListener('playing', hidePlayerError);
   $('btnNext').addEventListener('click', nextEpisode);
   // ---- 顶栏二级菜单（账号 / 历史 / 源）----

@@ -26,7 +26,11 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== STATIC_CACHE).map((k) => caches.delete(k))),
+      // 只清本应用的旧缓存目录：同源下可能还有别的站点/应用缓存，不能整库删除。
+      Promise.all(
+        keys.filter((k) => k !== STATIC_CACHE && k.indexOf('hg-static-') === 0)
+          .map((k) => caches.delete(k)),
+      ),
     ).then(() => self.clients.claim()),
   );
 });
