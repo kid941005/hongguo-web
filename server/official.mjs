@@ -1,9 +1,9 @@
-import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import axios from "axios";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { createDeviceStore } from "./device.mjs";
 
 const require = createRequire(import.meta.url);
 const { PlayerSigner } = require("./sign/argus.cjs");
@@ -87,38 +87,24 @@ function dataDir() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 }
 
-const DEVICE_FILE = () => path.join(dataDir(), "device.json");
-
-function readDeviceFile() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(DEVICE_FILE(), "utf8"));
-    if (raw && raw.device_id && raw.iid) return raw;
-  } catch {
-    /* 首次运行 / 文件损坏：当作没有档案 */
-  }
-  return null;
-}
-
-function writeDeviceFile(identity) {
-  try {
-    fs.mkdirSync(dataDir(), { recursive: true });
-    fs.writeFileSync(DEVICE_FILE(), JSON.stringify(identity, null, 2));
-  } catch (error) {
-    console.warn(JSON.stringify({ event: "device_persist_failed", message: String((error && error.message) || error) }));
-  }
-}
-
 export function createOfficial({ register, deriveContentKey } = {}) {
   if (typeof register !== "function" || typeof deriveContentKey !== "function")
     throw new Error("createOfficial 需要 register / deriveContentKey");
 
   const cache = new Map(); // epId -> { time, value } | { time, error }
   const inflight = new Map(); // epId -> Promise（同一集并发请求只打一次上游）
-  let identity = readDeviceFile();
-  let identityAt = identity ? Number(identity.time) || 0 : 0;
-  let identityPending = null;
+  // 设备身份（B3）：持久化 + 校验 + 节流轮换都交给 device.mjs，
+  // 这里只负责「什么时候用旧身份、什么时候必须换」。
+  const devices = createDeviceStore({
+    file: path.join(dataDir(), "device.json"),
+    envId: process.env.HONGGUO_DEVICE_ID,
+    envIid: process.env.HONGGUO_INSTALL_ID,
+    register,
+  });
 
-  const stats = { requests: 0, ok: 0, empty: 0, failed: 0, lastError: "", lastErrorAt: 0, registered: 0, invalidated: 0 };
+  const stats = { requests: 0, ok: 0, empty: 0, failed: 0, rotated: 0, lastError: "", lastErrorAt: 0, registered: 0, invalidated: 0 };
+  // 设备身份现状随 /api/metrics 一起暴露（source / 轮换次数 / 被节流次数），只含脱敏设备号。
+  Object.defineProperty(stats, "device", { get: () => devices.stats(), enumerable: true });
 
   function markError(error) {
     stats.failed += 1;
@@ -127,24 +113,11 @@ export function createOfficial({ register, deriveContentKey } = {}) {
   }
 
   async function getIdentity(fresh = false) {
-    if (!fresh && identity && Date.now() - identityAt < DEVICE_TTL) return identity;
-    if (identityPending) return identityPending;
-    identityPending = (async () => {
-      const registered = await register();
-      const next = {
-        device_id: String(registered.device_id),
-        iid: String(registered.iid),
-        time: Date.now(),
-      };
-      identity = next;
-      identityAt = next.time;
-      stats.registered += 1;
-      writeDeviceFile(next);
-      return next;
-    })().finally(() => {
-      identityPending = null;
-    });
-    return identityPending;
+    const identity = fresh
+      ? await devices.refresh("fresh")
+      : await devices.get({ maxAgeMs: DEVICE_TTL });
+    if (identity.source !== "env") stats.registered = devices.stats().registers;
+    return identity;
   }
 
   function parseModel(text, epId) {
@@ -196,7 +169,13 @@ export function createOfficial({ register, deriveContentKey } = {}) {
     if (resp.status !== 200) throw new Error("model HTTP " + resp.status);
     if (!text.trim()) {
       stats.empty += 1;
-      throw new Error("model 空响应（签名或设备身份被风控）");
+      // 200 空正文是「这份身份被风控」的典型信号：换一份身份往往立刻恢复。
+      // rotate 内部有 60 秒节流，所以连续失败不会把上游打成「一直在注册」。
+      const rotation = await devices.rotate("empty-body");
+      if (rotation.rotated) stats.rotated += 1;
+      throw new Error(
+        "model 空响应（签名或设备身份被风控）" + (rotation.rotated ? "，已换设备身份" : "")
+      );
     }
     return parseModel(text, epId);
   }

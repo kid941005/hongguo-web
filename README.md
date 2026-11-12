@@ -129,6 +129,8 @@ GHCR 包已设为 Public，可直接 `docker pull`（多架构 linux/amd64 + lin
 | `SOURCES_DIR` | `/app/sources/builtin` | 内置源目录 |
 | `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>` 或 `?token=<TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住，并自动给 `/api/media`、`/api/hls`、`/api/stream` 等媒体地址追加 token |
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
+| `HONGGUO_DEVICE_ID` | 空 | 钉死红果播放通道的匿名设备号（10~20 位纯数字）。不设置时首次注册后存 `DATA_DIR/device.json` 长期复用；设置后不再自动轮换 |
+| `HONGGUO_INSTALL_ID` | 空 | 配合 `HONGGUO_DEVICE_ID` 的 install id（10~20 位纯数字）；只钉 device_id 时由注册补一次 |
 | `ALLOW_PRIVATE_MEDIA` | 空 | 设为 `1` 时允许 `/api/media`、`/api/hls` 代理内网地址（默认拒绝，防 SSRF） |
 | `ALLOW_PRIVATE_FETCH` | 空 | 设为 `1` 时允许 JS 源脚本 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
 | `SOURCE_WORKER_MAX_OLD_MB` | `64` | 每个 JS 源沙箱线程的 V8 老生代内存上限（MB，最小 32）；超限自动终止该源 |
@@ -331,6 +333,7 @@ var spider = {
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。同一集同一档位被多人同时点开时只取址一次（并发请求共享同一条上游流），`/api/metrics` 的 `dedupe.shared` 可看到合并次数。
 - **红果内置流提供 1080P（HEVC）与 360P（H.264）两档**：服务端用 Android App 签名（x-argus + x-ladon）直连 `multi_video_model/v1` 取官方多档，拿到 CENC 加密流后在服务端解密、按 Range 转发（`/api/stream/<分集id>?q=1080p`）。播放器先探测浏览器 HEVC 解码能力：支持（Safari、装了 HEVC 扩展的 Edge/Chrome、部分安卓）用 1080P，不支持（Chrome/Windows 默认无 HEVC 扩展）自动落到 360P H.264 兼容线路，菜单里也可手动选。注意官方 360P–720P 档位是 **H.266/VVC** 编码，目前没有任何浏览器能解码，服务端直接不列入菜单；确实要给能解 VVC 的播放器直取时，用 `?q=720p&vvc=1`（不带 `vvc=1` 会得到 415，而不是一段黑屏流）。官方签名接口若再次变动，服务端自动回落官网明文 360P，不影响播放；若连档位信息都取不到，`/api/play` 只降级为「仅 360P 兼容线路」而不是整条播放失败。
 - **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路。连续 3 次被上游拒绝（空响应 / 风控 / 403 / 429 等）即熔断 30 秒：冷却期内请求直接快速失败（`503 UPSTREAM_COOLDOWN`，不再白等十几秒上游超时），到期只放行一个探测请求，探测再失败冷却翻倍（上限 5 分钟），探测成功立即恢复。官方通道与兼容通道各自独立熔断，指标见 `/api/metrics` 的 `breakers`。
+- **设备身份会被风控**：红果播放模型接口把「匿名注册的设备」当成风控维度，同一份身份被判异常后签名重算多少次都只会拿到 200 空正文。服务端把身份存进 `DATA_DIR/device.json` 长期复用（不再每 6 小时换一次），只有真的收到空正文才换一份新身份，且同一份身份 60 秒内最多换一次（换太勤等于主动喂风控）。身份来源、注册次数、轮换与被节流次数见 `/api/metrics` 的 `official.device`（设备号已脱敏）；用 `HONGGUO_DEVICE_ID` 钉死时不轮换。
 - **降级换源依赖别家也有同名剧**：替代源是在其它源的搜索结果里按标题相似度找的，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
