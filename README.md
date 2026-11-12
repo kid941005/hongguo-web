@@ -6,7 +6,7 @@
 
 一个可自托管的短剧网页播放器。自带「红果短剧」内置源（服务端解密、浏览器直连播放，无需客户端），并预留与**糖葫芦（THLRedGuo / CatPaw）同款格式的 JS 源**接口——把单文件 `spider` 源丢进来即可多源聚合。
 
-- 前端：原生 JS 单页（暗色、响应式），HLS 用内置 hls.js，MP4 直连
+- 前端：原生 JS 单页（深色 / 浅色 / 跟随设备三档主题、响应式），HLS 用内置 hls.js，MP4 直连
 - 后端：Node.js（ESM），账号数据存 SQLite（`node:sqlite`）
 - 容器：`node:22-bookworm-slim`，非 root、`read_only` + `cap_drop: ALL` 加固，镜像多架构（amd64 / arm64）
 
@@ -19,6 +19,7 @@
 | 检索 | 首页分类、分类分页、搜索；**多源聚合搜索**（并发、先回先展示、逐源失败信息） |
 | 发现 | 推荐页（四榜单真实评分合并）、猜你喜欢（协同过滤 + 相似题材 + 热门兜底） |
 | 播放 | HLS 多码率切档、当前分辨率徽标、倍速、全屏、下一集预取；播放失败自动找替代源 |
+| 界面 | 三档外观主题（深色 / 浅色 / 跟随设备，首帧不闪），顶栏与内容区同宽对齐，移动端安全区适配 |
 | 个人数据 | 账号登录、观看历史 / 续播、收藏、追剧提醒、倍速偏好，跨设备同步 |
 | 运维 | `/health`、`/api/metrics`、`/api/alerts` 通道监控、`/api/cache/clear` 一键清缓存、`/api/*` 访问日志、Webhook 告警 |
 | 质量 | `server/selftest.mjs` 离线自测（130 断言），CI 构建镜像前先跑 |
@@ -57,7 +58,7 @@ docker compose up -d        # 默认使用 ghcr.io/kid941005/hongguo-web:latest
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.11.1","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.12.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败标记 unhealthy。发布后还可以跑六项冒烟（health / 源列表 / 首页 / 猜你喜欢 / 源自检取流 / 播放监控）：
@@ -115,7 +116,7 @@ docker run -d --name hongguo-web \
   hongguo-web
 ```
 
-参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.11.1`。
+参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.12.0`。
 
 ### 1.7 升级、停止与卸载
 
@@ -246,6 +247,7 @@ Chrome/Edge 地址栏右侧会出现「安装」；手机浏览器「添加到�
 | `hg_watch_v1` | 浏览器 localStorage | 观看历史（source/id/title/cover/lineIdx/epIdx/pos/dur/at），最多 100 条；登录后同步到服务端 |
 | `hg_rate_v1` | 浏览器 localStorage | 上次选择的播放倍速（未登录时的本机缓存；登录后以服务端 `prefs` 为准） |
 | `hg_user_token` | 浏览器 localStorage | 登录令牌（30 天有效），退出登录即清除 |
+| `hg_theme` | 浏览器 localStorage | 外观主题：`auto`（默认，跟随设备）/ `light` / `dark` |
 
 ### 3.9 深链
 
