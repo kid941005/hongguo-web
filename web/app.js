@@ -33,6 +33,67 @@
   // 列表类请求的超时：源侧挂住时也要让「搜索中…/加载中…」有机会收尾，不能无限转。
   var LIST_TIMEOUT_MS = 15000;
 
+  // ---- 外观主题（深色 / 浅色 / 跟随设备）----
+  // 首帧判定在 index.html 的 <head> 内联脚本里完成（样式表之前），这里只负责：
+  // 1) 同步 UI 选中态；2) 用户切换后持久化；3) 「跟随设备」时随系统主题实时生效。
+  // 存储键沿用项目既有 hg_ 前缀约定：hg_theme = auto | light | dark
+  var THEME_KEY = 'hg_theme';
+  var THEME_LABEL = { light: '浅色', dark: '深色', auto: '跟随设备' };
+  var THEME_ICON = { light: '☀️', dark: '🌙', auto: '🖥️' };
+  var mqLight = (typeof window !== 'undefined' && window.matchMedia) ? window.matchMedia('(prefers-color-scheme: light)') : null;
+
+  function themeMode() {
+    try {
+      var v = localStorage.getItem(THEME_KEY) || 'auto';
+      return THEME_LABEL[v] ? v : 'auto';
+    } catch (e) { return 'auto'; }
+  }
+  function resolveTheme(mode) {
+    if (mode === 'light' || mode === 'dark') return mode;
+    return (mqLight && mqLight.matches) ? 'light' : 'dark';
+  }
+  // persist=false 用于「系统主题变化」与首次同步：跟随设备时不能把 auto 覆盖成具体档位。
+  function applyTheme(mode, persist) {
+    mode = THEME_LABEL[mode] ? mode : 'auto';
+    var resolved = resolveTheme(mode);
+    var de = document.documentElement;
+    de.setAttribute('data-theme', resolved);
+    de.setAttribute('data-theme-mode', mode);
+    var meta = $('metaThemeColor');
+    if (meta) meta.setAttribute('content', resolved === 'light' ? '#f4f6fa' : '#0b0d12');
+    var icon = $('themeIcon');
+    if (icon) icon.textContent = THEME_ICON[mode];
+    var items = document.querySelectorAll('.themechoice');
+    for (var i = 0; i < items.length; i++) {
+      var on = items[i].getAttribute('data-theme-mode') === mode;
+      items[i].classList.toggle('on', on);
+      items[i].setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+    if (persist) { try { localStorage.setItem(THEME_KEY, mode); } catch (e) {} }
+  }
+  function setTheme(mode) {
+    if (!THEME_LABEL[mode]) return;
+    applyTheme(mode, true);
+    toast('外观已切换：' + THEME_LABEL[mode]);
+  }
+  function initTheme() {
+    applyTheme(themeMode(), false);
+    var items = document.querySelectorAll('.themechoice');
+    for (var i = 0; i < items.length; i++) {
+      items[i].addEventListener('click', function (e) {
+        e.preventDefault();
+        setTheme(this.getAttribute('data-theme-mode'));
+        closeMenus();
+      });
+    }
+    // 「跟随设备」必须随系统主题实时变化；用户显式选了深色/浅色时这里不生效。
+    if (mqLight) {
+      var onScheme = function () { if (themeMode() === 'auto') applyTheme('auto', false); };
+      if (mqLight.addEventListener) mqLight.addEventListener('change', onScheme);
+      else if (mqLight.addListener) mqLight.addListener(onScheme);
+    }
+  }
+
   // 访问口令：服务端设了 TOKEN 时，前端可用 ?token=xxx 打开一次（会记住），之后自动带上
   var TOKEN_KEY = 'hg_token', tokenCache = null;
   // 口令既能用 ?token= 打开一次（分享链接），也能用 ?at=（媒体/清单地址专用，见 authUrl）。
@@ -2506,7 +2567,7 @@
     var panel = menu.querySelector('.menupanel'); if (panel) panel.classList.toggle('hidden', open);
     var btn = menu.querySelector('.menubtn'); if (btn) btn.setAttribute('aria-expanded', open ? 'false' : 'true');
   }
-  [['menuAccount', 'btnMenuAccount'], ['menuHistory', 'btnMenuHistory'], ['menuSource', 'btnMenuSource']].forEach(function (pair) {
+  [['menuTheme', 'btnMenuTheme'], ['menuAccount', 'btnMenuAccount'], ['menuHistory', 'btnMenuHistory'], ['menuSource', 'btnMenuSource']].forEach(function (pair) {
     var menu = $(pair[0]), btn = $(pair[1]);
     if (!menu || !btn) return;
     btn.addEventListener('click', function (e) { e.stopPropagation(); toggleMenu(menu); });
@@ -2628,6 +2689,7 @@
   bindPlayerEvents();
   // P2(#4)：启动即探测 HEVC 解码能力，清晰度菜单才能给出「HEVC·本机不支持」标注
   probeHevcCap();
+  initTheme();
   loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion(); loadHealth();
   setInterval(loadHealth, 60 * 1000);
   // PWA：注册 service worker（仅 http(s) 下有效）

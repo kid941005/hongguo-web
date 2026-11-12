@@ -4,10 +4,23 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>红果短剧 · 网页版</title>
+<script>
+/* 外观主题：必须在样式表之前同步执行，首帧即为正确主题（避免深色用户看到白屏闪烁）。
+   localStorage 键沿用项目既有 hg_ 前缀约定（hg_token / hg_user_token / hg_hevc）：hg_theme = auto | light | dark */
+(function () {
+  var mode = 'auto';
+  try { mode = localStorage.getItem('hg_theme') || 'auto'; } catch (e) {}
+  if (mode !== 'light' && mode !== 'dark') mode = 'auto';
+  var dark = mode === 'dark' || (mode === 'auto' && !(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches));
+  var de = document.documentElement;
+  de.setAttribute('data-theme', dark ? 'dark' : 'light');
+  de.setAttribute('data-theme-mode', mode);
+})();
+</script>
 <link rel="stylesheet" href="/style.css" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8D%92%3C/text%3E%3C/svg%3E" />
 <link rel="manifest" href="/manifest.webmanifest" />
-<meta name="theme-color" content="#0b0d12" />
+<meta name="theme-color" id="metaThemeColor" content="#0b0d12" />
 <link rel="apple-touch-icon" href="/icons/icon-192.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -27,6 +40,14 @@
       <button id="btnSearch" class="btn">搜索</button>
     </div>
     <div class="tbmenus">
+      <div class="tbmenu" id="menuTheme">
+        <button id="btnMenuTheme" class="menubtn" type="button" aria-haspopup="true" aria-expanded="false"><span id="themeIcon">🖥️</span>外观<span class="caret">▾</span></button>
+        <div class="menupanel hidden">
+          <button class="menuitem themechoice menucheckbox" data-theme-mode="light" type="button"><span>☀️ 浅色</span></button>
+          <button class="menuitem themechoice menucheckbox" data-theme-mode="dark" type="button"><span>🌙 深色</span></button>
+          <button class="menuitem themechoice menucheckbox" data-theme-mode="auto" type="button"><span>🖥️ 跟随设备</span></button>
+        </div>
+      </div>
       <div class="tbmenu" id="menuAccount">
         <button id="btnMenuAccount" class="menubtn" type="button" aria-haspopup="true" aria-expanded="false">账号<span class="caret">▾</span></button>
         <div class="menupanel hidden">
