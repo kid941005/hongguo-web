@@ -664,8 +664,18 @@ export function createCatalog({ provider, sources }) {
       const canTranscode = transcodeAvailable();
       const vvcCount = all ? all.filter((tier) => tier.codec === "vvc").length : 0;
       const tiers = all ? all.filter((tier) => tier.codec !== "vvc" || canTranscode) : null;
+      // 「自动」实际上等价于最高档：把它的 codec 标成最高档编码，前端才能按本机解码能力
+      // 正确置灰/回落（否则无 HEVC 的浏览器会默认起播必然黑屏的 1080P HEVC 流）。
+      const topTier = tiers && tiers.length ? tiers[0] : null;
       const options = [
-        { key: "auto", label: "自动（最高）", height: 0, codec: "", transcode: false, url: "/api/stream/" + id + "?q=auto" },
+        {
+          key: "auto",
+          label: "自动（最高）",
+          height: topTier ? topTier.height : 0,
+          codec: topTier ? topTier.codec : "",
+          transcode: false,
+          url: "/api/stream/" + id + "?q=auto",
+        },
         ...(tiers || []).map((tier) => {
           const transcoded = tier.codec === "vvc";
           return {

@@ -1259,6 +1259,16 @@
   // 返回 { dead, badge, title }：dead=true 表示置灰不可点。
   function qualityGate(o) {
     if (!o) return { dead: false, badge: '', title: '' };
+    // 「自动（最高）」按最高档判定：服务端 auto 等价于最高档，本机解不了最高档时同样置灰，
+    // 否则在无 HEVC 的浏览器里会默认起播必然黑屏的 HEVC 档。
+    if (o.key === 'auto') {
+      var best = (state.qualityOptions || []).filter(function (x) { return x.key !== 'auto'; })[0];
+      if (best) {
+        var bg = qualityGate(best);
+        if (bg.dead) return { dead: true, badge: '本机不支持最高档', title: '最高档「' + best.label + '」' + bg.badge + '，请选择其它清晰度' };
+      }
+      return { dead: false, badge: '', title: '' };
+    }
     var codec = String(o.codec || '').toLowerCase();
     var transcoded = o.transcode === true;
     if (codec === 'vvc') {
@@ -1276,8 +1286,13 @@
   function defaultPlayableOption() {
     var opts = (state.qualityOptions || []).filter(function (o) { return o.url && !qualityGate(o).dead; });
     if (!opts.length) return null;
+    // 优先「自动」，其次直连档（h264 原片），然后兼容档，最后才是服务端转码档（耗 CPU、不可拖动）。
     var auto = opts.filter(function (o) { return o.key === 'auto'; })[0];
-    return auto || opts[0];
+    if (auto) return auto;
+    var direct = opts.filter(function (o) { return !o.transcode && o.key !== 'auto'; })[0];
+    if (direct) return direct;
+    var compat = opts.filter(function (o) { return o.key === 'compat'; })[0];
+    return compat || opts[0];
   }
   // 切换到指定档位：native 直链靠换 src，HLS 靠 hls.js 的 level。
   function switchNativeQuality(o) {
