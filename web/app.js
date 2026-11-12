@@ -10,6 +10,8 @@
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [], qualityOptions: [], qualityNote: '',
     qualityKey: '', playKind: '', hevcCap: null, hevcFallback: false, silentSeek: false,
+    // A4：起播/切档时间 + 同档重试一次性标志（10s 内解码失败先原样重载一次）
+    switchAt: 0, switchRetried: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
     user: null, favs: [], follows: []
@@ -1018,6 +1020,8 @@
     var wasPlaying = !v.paused;
     state.qualityKey = o.key;
     state.hevcFallback = o.key === 'compat';
+    state.switchAt = Date.now();
+    state.switchRetried = false;
     state.pendingSeek = Math.floor(at);
     state.silentSeek = at > 3;
     hidePlayerError();
@@ -1288,6 +1292,8 @@
     state.hevcFallback = false;
     state.silentSeek = false;
     state.playKind = type === 'hls' ? 'hls' : 'native';
+    state.switchAt = Date.now();
+    state.switchRetried = false;
     if (qualityInfo && Array.isArray(qualityInfo.options) && qualityInfo.options.length) {
       state.qualityOptions = qualityInfo.options.map(function (o) {
         return { key: o.key, label: o.label, height: o.height, codec: o.codec || '', url: o.url || '', levelIndex: null };
@@ -1368,6 +1374,9 @@
         toast('已静音自动续播，点音量可恢复声音');
         return;
       }
+      // 已经有 MediaError、或错误本身就是「没有可播放的源」（NotSupportedError），都交给 error 事件的
+      // 三级阶梯处理：play() 的 reject 常常比 error 事件早一步到达，这里再弹一次会把它的话术盖掉。
+      if (v.error || err.name === 'NotSupportedError') return;
       var msg = '播放失败：' + (err.message || '未知错误');
       // 浏览器给的 message 常以 "." 结尾，别再补一个句号，否则会拼出「…was found.。可尝试换源」
       toast(msg); showPlayerError(msg + (/[。.!！?？]$/.test(msg) ? '' : '。') + '可尝试换源或重试。');
@@ -1402,6 +1411,29 @@
       }
       nextEpisode({ auto: true });
     }, 300);
+  }
+
+  // ---- 播放失败三级阶梯（A4）----
+  // 浏览器的 MediaError.code 只有 4 个值，原文是英文且不区分「网络抖动」和「真解不了」。
+  var MEDIA_ERR_TEXT = { 1: '加载被中断', 2: '网络错误', 3: '解码失败', 4: '格式不支持' };
+  function mediaErrLabel(code) { return MEDIA_ERR_TEXT[code] || ('媒体错误 ' + code); }
+  // 第一级：同档原样重载一次。首包损坏、切档瞬间旧管线残留、CDN 单节点抖动都能靠它救回来，
+  // 而且不用降清晰度。加时间戳参数强制绕过浏览器缓存里的失败响应。
+  function replaySameSource(label) {
+    var v = $('video');
+    var src = v.currentSrc || v.getAttribute('src') || '';
+    if (!src) return false;
+    state.switchRetried = true;
+    state.pendingSeek = Math.floor(v.currentTime || 0);
+    state.silentSeek = state.pendingSeek > 3;
+    hidePlayerError();
+    v.removeAttribute('src');
+    try { v.load(); } catch (e) {}
+    v.src = src + (src.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now();
+    var pr = v.play();
+    if (pr && pr.catch) pr.catch(function () {});
+    toast(label + '，正在同档重试…');
+    return true;
   }
 
   function bindPlayerEvents() {
@@ -1451,20 +1483,31 @@
       toast('该清晰度无法解码，已自动切换到 360P 兼容线路');
       switchNativeQuality(compat);
     });
-    // 编码不支持（Chrome/Windows 上的 HEVC 很常见）时自动回落到 360P 兼容线路，而不是只弹错。
+    // 播放失败三级阶梯：同档重试一次 → 回退 360P 兼容线路一次 → 给出具体原因。
+    // 旧实现只处理 code 3/4 且直接降档，网络类错误（code 2）完全没提示，页面就那么黑着。
     v.addEventListener('error', function () {
       var err = v.error;
-      if (!err || (err.code !== 3 && err.code !== 4)) return;
+      if (!err) return;
+      // 换源/切档时我们自己 removeAttribute('src')+load() 也会触发 ABORTED，不是真故障。
+      if (err.code === 1) return;
       if (state.playKind !== 'native') return;
-      if (state.hevcFallback) {
-        showPlayerError('播放失败：当前档位无法解码，可尝试切换数据源');
-        return;
+      var label = mediaErrLabel(err.code);
+      // 第一级：刚起播/刚切档 10 秒内失败，先原样重载一次同档（一次性标志，避免失败循环）。
+      if (!state.switchRetried && Date.now() - state.switchAt < 10000 && replaySameSource(label)) return;
+      // 第二级：回退 360P 兼容线路，整个播放过程只做一次（hevcFallback 兼作一次性标志）。
+      if (!state.hevcFallback) {
+        var compat = optionByKey('compat');
+        if (compat && compat.url) {
+          state.hevcFallback = true;
+          toast(label + '，已自动切换到 360P 兼容线路');
+          switchNativeQuality(compat);
+          return;
+        }
       }
-      var compat = optionByKey('compat');
-      if (!compat || !compat.url) return;
-      state.hevcFallback = true;
-      toast('该编码无法解码，已自动切换到 360P 兼容线路');
-      switchNativeQuality(compat);
+      // 第三级：阶梯走完还失败，给出人能看懂的原因，别只弹浏览器的英文媒体错误。
+      var msg = '播放失败：' + label + '，可尝试切换数据源或换一集';
+      showPlayerError(msg);
+      toast(msg);
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
     document.addEventListener('keydown', onPlayerKey);
