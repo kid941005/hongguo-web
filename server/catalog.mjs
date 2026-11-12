@@ -650,6 +650,13 @@ export function createCatalog({ provider, sources }) {
           })
         );
       }
+      // 分集不存在时官方接口回「model 返回错误码 101000」（实测假 id/把剧 id 当集 id 都是它）。
+      // 以前只 warn 就当能播，于是假 id 也返回 200 + 可播地址。这里只把「明确的缺失/无效」映射成 404；
+      // 超时、限流、风控、HTTP 5xx 等上游故障不匹配，仍按原样降级成兼容档（不能掩盖成 404）。
+      const qualityError = String((info && info.error) || "");
+      if (qualityError && /不存在|无效|404|下架|not found|101000/i.test(qualityError)) {
+        throw fail("NOT_FOUND", "剧集不存在或已下架");
+      }
       const all = info && Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
       // 360P–720P 是 H.266/VVC，任何浏览器都解不了，列出来只会点开黑屏，直接不提供。
       const tiers = all ? all.filter((tier) => tier.codec !== "vvc") : null;
@@ -693,7 +700,16 @@ export function createCatalog({ provider, sources }) {
       const rawHeaders = out.header || out.headers;
       headers = rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders) ? rawHeaders : {};
     }
-    if (!url) throw fail("NO_URL", "该集没有可用播放地址");
+    if (!url) {
+      // 源用 error 字段说明原因（内置源约定的 MISSING_EPISODE 等）。区分两件事：
+      //   - 上游网络/限流故障 -> 502（UPSTREAM_ERROR），不能伪装成 404；
+      //   - 其余（没有这一集/分集不存在）-> 404 NOT_FOUND，不能 200 返回空地址。
+      const sourceError = String((out && !Array.isArray(out) && (out.error || out.err || out.msg)) || "");
+      if (/UPSTREAM_FAILED|UPSTREAM|TIMEOUT|ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket|TLS|HTTP\s*\d{3}|限流|风控|网络/i.test(sourceError)) {
+        throw fail("UPSTREAM_ERROR", "该源上游暂时不可用：" + (sourceError || "无响应"));
+      }
+      throw fail("NOT_FOUND", "该源没有这一集（分集可能不存在）");
+    }
     if (/^[0-9a-f]{32}$/i.test(url)) throw fail("ENCRYPTED", "该源返回加密标识而非播放地址，网页版暂不支持");
     // 很多源返回协议相对地址（//cdn/x.m3u8），浏览器能识别但服务端 new URL 会失败。
     if (url.startsWith("//")) url = "https:" + url;
