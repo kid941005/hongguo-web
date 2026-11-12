@@ -74,7 +74,7 @@ BASE=http://127.0.0.1:8787 node server/scripts/smoke.mjs
 | --- | --- |
 | 换宿主机端口 | `ports` 改成 `9000:8787`（左=宿主机，右=容器） |
 | 连容器端口一起换 | `environment.PORT` 与 `ports` 右边改成同一个值（如都改 9000） |
-| 加访问口令 | `environment.TOKEN` 填口令；浏览器首次访问 `http://<host>:8787/?token=<口令>`，之后前端会记住，并自动给媒体地址带 token |
+| 加访问口令 | `environment.TOKEN` 填口令；浏览器首次访问 `http://<host>:8787/?at=<口令>`，之后前端会记住，并自动给媒体地址带 `at=`（`?token=` 仍兼容旧链接） |
 | 放大并发播放 | `environment.MAX_STREAMS: "12"` |
 | 允许代理内网媒体 | `environment.ALLOW_PRIVATE_MEDIA: "1"`（默认 `0` 拒绝，防 SSRF） |
 | 改时区 | `environment.TZ: "Asia/Shanghai"` |
@@ -146,7 +146,7 @@ docker compose down -v                        # 连数据卷一起删（会丢�
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `/app/data` | 配置、用户源、源更新状态与账号库（`hongguo.db`）目录（需可写，建议挂持久卷） |
 | `SOURCES_DIR` | `/app/sources/builtin` | 内置源目录 |
-| `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>` 或 `?token=<TOKEN>`；浏览器打开 `http://<host>:8787/?token=<TOKEN>` 一次即可，前端会记住并自动给媒体地址追加 token |
+| `TOKEN` | 空 | 设置后所有 `/api/*` 需带 `Authorization: Bearer <TOKEN>` 或 `?at=<TOKEN>`（`?token=` 兼容保留）；浏览器打开 `http://<host>:8787/?at=<TOKEN>` 一次即可，前端会记住并自动给媒体地址追加 `at=`；未设置时管理接口（源导入/清缓存）只接受内网来源 |
 
 ### 2.2 播放与安全
 
@@ -154,6 +154,7 @@ docker compose down -v                        # 连数据卷一起删（会丢�
 | --- | --- | --- |
 | `MAX_STREAMS` | `6` | 内置红果解密流的最大并发数 |
 | `ALLOW_PRIVATE_MEDIA` | 空 | `1` 时允许 `/api/media`、`/api/hls` 代理内网地址（默认拒绝，防 SSRF） |
+| `TRUST_PROXY` | 空 | `1` 时按 `X-Forwarded-For` 第一跳识别客户端 IP（登录限流按人计数）；只在前面有反向代理/网关时开启，否则该头可被伪造绕过限流 |
 | `ALLOW_PRIVATE_FETCH` | 空 | `1` 时允许 JS 源 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
 | `HONGGUO_DEVICE_ID` | 空 | 钉死红果播放通道的匿名设备号（10~20 位纯数字）。不设置时首次注册后存 `DATA_DIR/device.json` 长期复用；设置后不再自动轮换 |
 | `HONGGUO_INSTALL_ID` | 空 | 配合 `HONGGUO_DEVICE_ID` 的 install id（10~20 位纯数字）；只钉 device_id 时由注册补一次 |
@@ -330,14 +331,14 @@ var spider = {
 | GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集） |
 | GET | `/api/play?source=&flag=&id=` | 取播放地址（`{type,url}`；内置红果额外带 `quality:{options:[{key,label,height,codec,url}],note}`） |
 | GET | `/api/play/fallback?source=&id=&index=` | 播放失败时的替代源：按剧名跨源匹配，返回 `{candidates:[{source,name,id,title,episodeCount,targetIndex,episodeName,score}]}`（最多 3 个） |
-| GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer）；图片请求（`Accept: image/*` 或图片后缀）上游失败时回内置占位图 **200**，响应头 `x-media-fallback` 标明原因 |
-| GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带 token） |
-| GET/HEAD | `/api/stream/:epId?q=&token=&vvc=` | 内置红果分集流（服务端解密 + Range）；`q` 取 `auto`（最高可播档）/ `1080p`（HEVC）/ `720p` / `540p` / `480p` / `360p` / `compat`（官网 360P H.264 兜底）；响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码。显式点 VVC 档（`q=720p` 等）默认回 **415** `CODEC_UNSUPPORTED`，确需直取时加 `vvc=1`；加 `tc=1` 则由服务端用 ffmpeg 把该 VVC 档**转码成 H.264** 下发（200、`x-stream-transcode:1`、`accept-ranges:none`，可播但不可拖动） |
+| GET | `/api/media?u=&r=&at=` | 媒体透传（支持 Range，`r` 为 Referer）；图片请求（`Accept: image/*` 或图片后缀）上游失败时回内置占位图 **200**，响应头 `x-media-fallback` 标明原因 |
+| GET | `/api/hls?u=&r=&at=` | HLS 清单重写（分片走 `/api/media`，自动带 `at=`；清单内上游鉴权参数用 `st=` 单独传递，不与本站口令混用） |
+| GET/HEAD | `/api/stream/:epId?q=&at=&vvc=` | 内置红果分集流（服务端解密 + Range）；`q` 取 `auto`（最高可播档）/ `1080p`（HEVC）/ `720p` / `540p` / `480p` / `360p` / `compat`（官网 360P H.264 兜底）；响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码。显式点 VVC 档（`q=720p` 等）默认回 **415** `CODEC_UNSUPPORTED`，确需直取时加 `vvc=1`；加 `tc=1` 则由服务端用 ffmpeg 把该 VVC 档**转码成 H.264** 下发（200、`x-stream-transcode:1`、`accept-ranges:none`，可播但不可拖动） |
 
 认证：
 
 - 个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需登录，请求头带 `X-Auth-Token: <token>`
-- 应用级 `TOKEN` 支持 `Authorization: Bearer` 或 `?token=`（媒体/流地址由前端自动追加）
+- 应用级 `TOKEN` 支持 `Authorization: Bearer` 或 `?at=`（媒体/流地址由前端自动追加；`?token=` 仅兼容旧链接）
 
 错误与日志：
 

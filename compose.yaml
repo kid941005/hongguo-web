@@ -26,9 +26,12 @@ services:
       TZ: "Asia/Shanghai"                  # 时区，日志时间用
 
       # ---------- 访问控制 ----------
-      # 填了口令则所有 /api/* 需带 Authorization: Bearer <TOKEN> 或 ?token=<TOKEN>；
-      # 浏览器首次打开 http://<host>:8787/?token=<TOKEN> 一次，前端会记住，并自动给媒体/流地址追加 token。留空=不校验。
+      # 填了口令则所有 /api/* 需带 Authorization: Bearer <TOKEN> 或 ?at=<TOKEN>（?token= 兼容旧链接）；
+      # 浏览器首次打开 http://<host>:8787/?at=<TOKEN> 一次，前端会记住，并自动给媒体/流地址追加 at=。
+      # 留空=不校验，但此时源导入/清缓存等管理接口只接受内网来源。
       TOKEN: ""
+      # 前面有反向代理/网关时设为 "1"，登录限流才会按真实客户端 IP 计数（默认不采信 X-Forwarded-For）。
+      # TRUST_PROXY: "1"
 
       # ---------- 播放 / 安全 ----------
       MAX_STREAMS: "6"                     # 内置红果解密流的最大并发数
