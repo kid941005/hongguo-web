@@ -2552,6 +2552,17 @@
       if (hadSwController) location.reload();
     });
     window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); });
+    // PWA 独立窗口可能长期不重新导航：回到前台时主动检查一次 sw.js，有新版本就安装接管
+    //（接管后 controllerchange 已自动刷新一次），避免安装版一直停在旧界面。
+    function checkSwUpdate() {
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (reg) reg.update().catch(function () {});
+      }).catch(function () {});
+    }
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') checkSwUpdate();
+    });
+    window.addEventListener('focus', checkSwUpdate);
   }
   loadSources().then(function () {
     var sp = new URLSearchParams(location.search);

@@ -53,16 +53,30 @@ export function createStaticHandler(webDir) {
     }
 
     let data;
+    let stat;
     try {
-      data = await fs.promises.readFile(real);
+      [stat, data] = await Promise.all([fs.promises.stat(real), fs.promises.readFile(real)]);
     } catch {
       throw fail("NOT_FOUND", "文件不存在");
+    }
+
+    // ETag 让「每次都回源校验」变成廉价的 304：静态资源一律 no-cache（可缓存但必须校验），
+    // 内容没变时只回 304 空响应，Service Worker 与浏览器都不必重新下载 app.js/style.css。
+    const etag = '"' + data.length.toString(16) + "-" + Math.floor(stat.mtimeMs).toString(16) + '"';
+    const cacheHeaders = { "cache-control": "no-cache", etag };
+    const ifNoneMatch = req.headers["if-none-match"];
+    if (ifNoneMatch && ifNoneMatch.split(",").some((tag) => {
+      const value = tag.trim();
+      return value === "*" || value === etag || value === "W/" + etag;
+    })) {
+      res.writeHead(304, cacheHeaders);
+      return res.end();
     }
 
     res.writeHead(200, {
       "content-type": MIME[path.extname(real).toLowerCase()] || "application/octet-stream",
       "content-length": data.length,
-      "cache-control": "no-cache",
+      ...cacheHeaders,
     });
     if (req.method === "HEAD") return res.end();
     res.end(data);
