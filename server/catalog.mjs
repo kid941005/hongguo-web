@@ -1,4 +1,5 @@
 import { fail } from "./errors.mjs";
+import { transcodeAvailable } from "./transcode.mjs";
 
 // 统一目录层：把「内置红果解密源」与「糖葫芦 / CatPawOpen 风格 JS 源」归一成同一套接口。
 // 约定：所有对外方法都返回 { source, items|lines|episodes, ... }，字段缺失一律给空值而不是 undefined。
@@ -658,31 +659,39 @@ export function createCatalog({ provider, sources }) {
         throw fail("NOT_FOUND", "剧集不存在或已下架");
       }
       const all = info && Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
-      // 360P–720P 是 H.266/VVC，任何浏览器都解不了，列出来只会点开黑屏，直接不提供。
-      const tiers = all ? all.filter((tier) => tier.codec !== "vvc") : null;
+      // 1080P 是 HEVC（设备/浏览器支持时可硬解）；360P–720P 是 H.266/VVC，浏览器一定解不了。
+      // 只有服务端装了 7.1+ 的 ffmpeg 时，VVC 档才以「服务端边转码成 H.264」的形式提供（可播放但不可拖动）。
+      const canTranscode = transcodeAvailable();
+      const vvcCount = all ? all.filter((tier) => tier.codec === "vvc").length : 0;
+      const tiers = all ? all.filter((tier) => tier.codec !== "vvc" || canTranscode) : null;
       const options = [
-        { key: "auto", label: "自动（最高）", height: 0, codec: "", url: "/api/stream/" + id + "?q=auto" },
-        ...(tiers || []).map((tier) => ({
-          key: tier.key,
-          label: tier.label,
-          height: tier.height,
-          codec: tier.codec,
-          url: "/api/stream/" + id + "?q=" + encodeURIComponent(tier.key),
-        })),
-        { key: "compat", label: "360P 兼容", height: 360, codec: "h264", url: "/api/stream/" + id + "?q=compat" },
+        { key: "auto", label: "自动（最高）", height: 0, codec: "", transcode: false, url: "/api/stream/" + id + "?q=auto" },
+        ...(tiers || []).map((tier) => {
+          const transcoded = tier.codec === "vvc";
+          return {
+            key: tier.key,
+            label: tier.label,
+            height: tier.height,
+            codec: tier.codec,
+            transcode: transcoded,
+            url: "/api/stream/" + id + "?q=" + encodeURIComponent(tier.key) + (transcoded ? "&tc=1" : ""),
+          };
+        }),
+        { key: "compat", label: "360P 兼容", height: 360, codec: "h264", transcode: false, url: "/api/stream/" + id + "?q=compat" },
       ];
+      const noteParts = [];
+      if (tiers) noteParts.push("1080P 为 HEVC 编码：设备支持 HEVC 时可硬解，不支持时自动回落到 360P 兼容线路。");
+      if (canTranscode && vvcCount)
+        noteParts.push("360P–720P 是 H.266/VVC，浏览器无法解码，已由服务端边转码成 H.264（可播放，但不能拖动进度）。");
+      else if (vvcCount)
+        noteParts.push("官方 360P–720P 档位是 H.266/VVC 编码，浏览器无法解码，且服务端未启用转码（安装 ffmpeg 7.1+ 后可用），未列入菜单。");
       return {
         type: "native",
         url: "/api/stream/" + id + "?q=auto",
         contentType: "video/mp4",
         quality: {
           options,
-          note: tiers
-            ? "高清档为 HEVC 编码：浏览器不支持 HEVC 时会自动回落到 360P 兼容线路。" +
-              (all && all.length > tiers.length
-                ? " 官方 360P–720P 档位是 H.266/VVC 编码，浏览器无法解码，未列入菜单。"
-                : "")
-            : "未取到高清档（官方接口暂不可用），当前仅提供 360P 兼容线路。",
+          note: noteParts.length ? noteParts.join(" ") : "未取到高清档（官方接口暂不可用），当前仅提供 360P 兼容线路。",
         },
       };
     }

@@ -157,6 +157,8 @@ docker compose down -v                        # 连数据卷一起删（会丢�
 | `ALLOW_PRIVATE_FETCH` | 空 | `1` 时允许 JS 源 `fetch` 与按 URL 导入源访问内网地址（默认拒绝，防 SSRF） |
 | `HONGGUO_DEVICE_ID` | 空 | 钉死红果播放通道的匿名设备号（10~20 位纯数字）。不设置时首次注册后存 `DATA_DIR/device.json` 长期复用；设置后不再自动轮换 |
 | `HONGGUO_INSTALL_ID` | 空 | 配合 `HONGGUO_DEVICE_ID` 的 install id（10~20 位纯数字）；只钉 device_id 时由注册补一次 |
+| `FFMPEG_PATH` | `ffmpeg` | 服务端转码用的 ffmpeg 可执行文件。官方镜像已装（`/usr/bin/ffmpeg`，7.1+ 带 VVC 解码）；裸机运行时需自行安装 7.1 以上版本，否则 VVC 高清档不会出现在清晰度菜单 |
+| `TRANSCODE_MAX_INPUT_BYTES` | `100663296` | 单集转码的输入上限（字节，默认 96 MB）；超限直接报错而不是拖垮内存 |
 
 ### 2.3 JS 源沙箱
 
@@ -330,7 +332,7 @@ var spider = {
 | GET | `/api/play/fallback?source=&id=&index=` | 播放失败时的替代源：按剧名跨源匹配，返回 `{candidates:[{source,name,id,title,episodeCount,targetIndex,episodeName,score}]}`（最多 3 个） |
 | GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer）；图片请求（`Accept: image/*` 或图片后缀）上游失败时回内置占位图 **200**，响应头 `x-media-fallback` 标明原因 |
 | GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带 token） |
-| GET/HEAD | `/api/stream/:epId?q=&token=&vvc=` | 内置红果分集流（服务端解密 + Range）；`q` 取 `auto`（最高可播档）/ `1080p`（HEVC）/ `720p` / `540p` / `480p` / `360p` / `compat`（官网 360P H.264 兜底）；响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码。显式点 VVC 档（`q=720p` 等）默认回 **415** `CODEC_UNSUPPORTED`，确需直取时加 `vvc=1` |
+| GET/HEAD | `/api/stream/:epId?q=&token=&vvc=` | 内置红果分集流（服务端解密 + Range）；`q` 取 `auto`（最高可播档）/ `1080p`（HEVC）/ `720p` / `540p` / `480p` / `360p` / `compat`（官网 360P H.264 兜底）；响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码。显式点 VVC 档（`q=720p` 等）默认回 **415** `CODEC_UNSUPPORTED`，确需直取时加 `vvc=1`；加 `tc=1` 则由服务端用 ffmpeg 把该 VVC 档**转码成 H.264** 下发（200、`x-stream-transcode:1`、`accept-ranges:none`，可播但不可拖动） |
 
 认证：
 
@@ -361,6 +363,7 @@ hongguo-web/
 │  ├─ media.mjs                     # /api/media 透传（Range）+ /api/hls 清单重写 + 占位图
 │  ├─ stream.mjs                    # /api/stream 内置解密流（Range、并发上限、取址去重）
 │  ├─ mp4.mjs                       # 首块 MP4 盒校验
+│  ├─ transcode.mjs                 # H.266/VVC → H.264 服务端转码（ffmpeg，边转边发、不可拖动）
 │  ├─ monitor.mjs                   # 播放通道定时探针与告警
 │  ├─ recommend.mjs                 # 推荐 / 猜你喜欢排序
 │  ├─ static.mjs                    # 静态文件托管（越界校验、MIME、HEAD）
@@ -396,7 +399,7 @@ docker run --rm -v "$PWD":/w -w /w node:22-bookworm-slim sh -c \
 - **内置红果搜索**：主通道是官网搜索页自己用的 JSON 接口 `GET /api/search/result?query=`（只校验 UA，不依赖 App 签名），响应带 `channel: "web"`、`total`、`hasMore`；失败才降级为首页推荐池检索（`fallback: true`、`channel: "pool"`，结果不全）。
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。同一集同一档位被多人同时点开只取址一次，`/api/metrics` 的 `dedupe.shared` 可看合并次数。
-- **红果内置流只有 1080P（HEVC）与 360P（H.264）可播**：官方 720P 等档位是 **H.266/VVC**，目前没有浏览器能解码，服务端直接不列入菜单；确实要给能解 VVC 的播放器直取时用 `?q=720p&vvc=1`（不带 `vvc=1` 会得到 415，而不是一段黑屏流）。官方签名接口再变动时，服务端自动回落官网明文 360P；若连档位信息都取不到，`/api/play` 只降级为「仅 360P 兼容线路」，不会整条播放失败。
+- **红果内置流的分档**：1080P 是 **HEVC**，360P 是 **H.264**，两者浏览器可解（HEVC 需设备/浏览器支持，Chrome 有 GPU 时可硬解）；官方 360P–720P 中间档是 **H.266/VVC**，任何浏览器都没有解码器，只有服务端装了 7.1+ 的 ffmpeg 才由服务端转成 H.264 提供（菜单里标注「转码」）。转码线路是**边转边发、不可拖动**，CPU 占用约 12× 实时（单核），并发多了会排队；没有 ffmpeg 时这些档不列入菜单。给能解 VVC 的外部播放器直取仍可用 `?q=720p&vvc=1`。官方签名接口再变动时，服务端自动回落官网明文 360P；若连档位信息都取不到，`/api/play` 只降级为「仅 360P 兼容线路」，不会整条播放失败。
 - **设备身份会被风控**：红果播放模型接口把「匿名注册的设备」当风控维度，同一份身份被判异常后签名重算多少次都只会拿到 200 空正文。服务端把身份存 `DATA_DIR/device.json` 长期复用，只有真收到空正文才换一份，且同一身份 60 秒内最多换一次。身份来源、注册 / 轮换 / 被节流次数见 `/api/metrics` 的 `official.device`（已脱敏）；`HONGGUO_DEVICE_ID` 钉死时不轮换。
 - **降级换源依赖别家也有同名剧**：替代源按标题相似度在其它源搜索结果里找，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。

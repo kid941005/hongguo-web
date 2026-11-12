@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { fail, statusOf, publicMessage, headersOf } from "./errors.mjs";
 import { createStaticHandler } from "./static.mjs";
 import { createStreamHandler } from "./stream.mjs";
+import { transcodeToResponse, transcodeStats } from "./transcode.mjs";
 import { proxyMedia, proxyHls } from "./media.mjs";
 
 const MAX_BODY = 3 * 1024 * 1024;
@@ -134,6 +135,7 @@ export function createServer({ provider, sources, catalog, users = null, monitor
         rss: process.memoryUsage().rss,
         ...(typeof provider.metrics === "function" ? provider.metrics() : {}),
         ...(typeof serveStream.dedupe === "function" ? { dedupe: serveStream.dedupe() } : {}),
+        transcode: transcodeStats(),
         playback: monitor ? monitor.snapshot() : null,
       })],
 
@@ -364,8 +366,19 @@ export function createServer({ provider, sources, catalog, users = null, monitor
     }],
 
     // ---- 内置红果：服务端解密流 ----
-    ["GET", /^\/api\/stream\/(\d{1,30})$/, ({ req, res, params, q }) =>
-      serveStream(req, res, params[0], q.get("q") || "auto", q.get("vvc") === "1")],
+    ["GET", /^\/api\/stream\/(\d{1,30})$/, async ({ req, res, params, q }) => {
+      // tc=1：该档是 H.266/VVC，交给服务端 ffmpeg 转成 H.264（浏览器没有 VVC 解码器）。
+      if (q.get("tc") === "1")
+        return transcodeToResponse({
+          provider,
+          epId: params[0],
+          quality: q.get("q") || "auto",
+          req,
+          res,
+          logger: (entry) => console.log(JSON.stringify(entry)),
+        });
+      return serveStream(req, res, params[0], q.get("q") || "auto", q.get("vvc") === "1");
+    }],
   ];
 
   async function dispatch(req, res) {
