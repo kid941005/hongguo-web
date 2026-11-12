@@ -17,6 +17,8 @@ const STATUS = {
   RATE_LIMITED: 429,
   // 资源
   NOT_FOUND: 404,
+  // 415：请求本身合法，但要求的编码/格式客户端解不了（如 H.266/VVC 档位）
+  CODEC_UNSUPPORTED: 415,
   // 服务端 / 上游
   BUSY: 503,
   DOWNLOAD: 502,
@@ -43,6 +45,15 @@ export function fail(code, message) {
 
 export function statusOf(code) {
   return STATUS[code] || 502;
+}
+
+// 「过一会儿再来」类错误附带 Retry-After，客户端不必猜等多久。
+const RETRY_AFTER_CODES = new Set(["UPSTREAM_COOLDOWN", "RATE_LIMITED", "BUSY"]);
+
+export function headersOf(code, error) {
+  if (!RETRY_AFTER_CODES.has(code)) return {};
+  const seconds = Number(error && error.retryAfter);
+  return Number.isFinite(seconds) && seconds > 0 ? { "retry-after": String(Math.ceil(seconds)) } : {};
 }
 
 // 未分类错误（无 code）对外只给通用文案，避免把上游细节/内网地址抛给浏览器。

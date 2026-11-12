@@ -1,6 +1,6 @@
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { fail, statusOf, publicMessage } from "./errors.mjs";
+import { fail, statusOf, publicMessage, headersOf } from "./errors.mjs";
 import { createStaticHandler } from "./static.mjs";
 import { createStreamHandler } from "./stream.mjs";
 import { proxyMedia, proxyHls } from "./media.mjs";
@@ -89,7 +89,11 @@ function rateLimit(req) {
     rateBuckets.set(ip, bucket);
   }
   bucket.count += 1;
-  if (bucket.count > RATE_MAX) throw fail("RATE_LIMITED", "尝试过于频繁，请稍后再试");
+  if (bucket.count > RATE_MAX) {
+    const error = fail("RATE_LIMITED", "尝试过于频繁，请稍后再试");
+    error.retryAfter = Math.ceil((bucket.start + RATE_WINDOW - now) / 1000);
+    throw error;
+  }
   if (rateBuckets.size > 10000) {
     for (const [key, value] of rateBuckets) if (now - value.start >= RATE_WINDOW) rateBuckets.delete(key);
   }
@@ -360,7 +364,7 @@ export function createServer({ provider, sources, catalog, users = null, monitor
 
     // ---- 内置红果：服务端解密流 ----
     ["GET", /^\/api\/stream\/(\d{1,30})$/, ({ req, res, params, q }) =>
-      serveStream(req, res, params[0], q.get("q") || "auto")],
+      serveStream(req, res, params[0], q.get("q") || "auto", q.get("vvc") === "1")],
   ];
 
   async function dispatch(req, res) {
@@ -417,10 +421,13 @@ export function createServer({ provider, sources, catalog, users = null, monitor
       if (!error || !error.code) {
         console.error(JSON.stringify({ event: "request_failed", path: req.url, message: String((error && error.message) || error) }));
       }
-      sendJson(res, statusOf(error && error.code), {
-        error: publicMessage(error),
-        code: (error && error.code) || "UPSTREAM_ERROR",
-      });
+      const code = (error && error.code) || "UPSTREAM_ERROR";
+      sendJson(
+        res,
+        statusOf(code),
+        { error: publicMessage(error), code },
+        headersOf(code, error)
+      );
     });
   });
 }

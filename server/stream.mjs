@@ -48,7 +48,20 @@ export function createStreamHandler({ provider, limit = 6 }) {
     return { stream, range, first };
   }
 
-  return async function serveStream(req, res, epId, quality) {
+  // 明确指定档位时先查该档编码：H.266/VVC 任何浏览器都解不了，直接 415 比给一段黑屏流更诚实。
+  // 只查缓存过的档位信息，查不到就放行（不为了拒绝一个请求去打上游）。
+  async function codecOfTier(epId, key) {
+    if (typeof provider.quality !== "function") return "";
+    try {
+      const info = await provider.quality(epId);
+      const tier = ((info && info.tiers) || []).find((item) => item.key === key);
+      return tier ? String(tier.codec || "") : "";
+    } catch {
+      return "";
+    }
+  }
+
+  return async function serveStream(req, res, epId, quality, allowVvc = false) {
     const wanted = String(quality || "auto").toLowerCase();
     if (!QUALITIES.has(wanted)) throw fail("BAD_INPUT", "清晰度参数无效");
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
@@ -63,6 +76,16 @@ export function createStreamHandler({ provider, limit = 6 }) {
         "cache-control": "no-store",
       });
       return res.end();
+    }
+    // auto/compat 由服务端选档，不会挑 VVC；显式点档位时才需要这层拦截。
+    if (!allowVvc && wanted !== "auto" && wanted !== "compat") {
+      const codec = await codecOfTier(epId, wanted);
+      if (codec === "vvc") {
+        throw fail(
+          "CODEC_UNSUPPORTED",
+          "该清晰度是 H.266/VVC 编码，浏览器无法解码；需要直取请加 vvc=1"
+        );
+      }
     }
     if (active >= limit) throw fail("BUSY", "同时播放数已达上限（" + limit + "），请稍后重试");
 

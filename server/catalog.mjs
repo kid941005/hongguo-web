@@ -460,8 +460,20 @@ export function createCatalog({ provider, sources }) {
       if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
       // 官方接口能取到真实多档（360P–1080P，全部 HEVC + CENC），服务端解密后按 Range 转发。
       // 菜单要如实反映可用档位：查不到档位时只列 360P 兼容档，不伪造点不开的高清项。
-      const info = await provider.quality(String(id));
-      const all = Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
+      // 档位信息只用于渲染菜单：它失败（超时/上游抖动/熔断）不能连累取流地址，否则本来能播的剧也 502。
+      let info = null;
+      try {
+        info = await provider.quality(String(id));
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            event: "play_quality_failed",
+            id: String(id),
+            message: String((error && error.message) || error),
+          })
+        );
+      }
+      const all = info && Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
       // 360P–720P 是 H.266/VVC，任何浏览器都解不了，列出来只会点开黑屏，直接不提供。
       const tiers = all ? all.filter((tier) => tier.codec !== "vvc") : null;
       const options = [
