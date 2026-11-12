@@ -409,7 +409,9 @@ export function createCatalog({ provider, sources }) {
       // 官方接口能取到真实多档（360P–1080P，全部 HEVC + CENC），服务端解密后按 Range 转发。
       // 菜单要如实反映可用档位：查不到档位时只列 360P 兼容档，不伪造点不开的高清项。
       const info = await provider.quality(String(id));
-      const tiers = Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
+      const all = Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
+      // 360P–720P 是 H.266/VVC，任何浏览器都解不了，列出来只会点开黑屏，直接不提供。
+      const tiers = all ? all.filter((tier) => tier.codec !== "vvc") : null;
       const options = [
         { key: "auto", label: "自动（最高）", height: 0, codec: "", url: "/api/stream/" + id + "?q=auto" },
         ...(tiers || []).map((tier) => ({
@@ -428,7 +430,10 @@ export function createCatalog({ provider, sources }) {
         quality: {
           options,
           note: tiers
-            ? "高清档为 HEVC 编码：浏览器不支持 HEVC 时会自动回落到 360P 兼容线路。"
+            ? "高清档为 HEVC 编码：浏览器不支持 HEVC 时会自动回落到 360P 兼容线路。" +
+              (all && all.length > tiers.length
+                ? " 官方 360P–720P 档位是 H.266/VVC 编码，浏览器无法解码，未列入菜单。"
+                : "")
             : "未取到高清档（官方接口暂不可用），当前仅提供 360P 兼容线路。",
         },
       };

@@ -252,6 +252,16 @@ export function createOfficial({ register, deriveContentKey } = {}) {
     throw lastError;
   }
 
+  // 红果官方档位的编码：bytevc1 = H.265/HEVC，bytevc2 = H.266/VVC。
+  // VVC 目前没有任何浏览器能解，必须单独标出来，否则会被误当成 HEVC 去试。
+  function codecOf(raw) {
+    const s = String(raw || "").toLowerCase();
+    if (/bytevc2|vvc|h266/.test(s)) return "vvc";
+    if (/bytevc1|hevc|hev|hvc|h265/.test(s)) return "hevc";
+    if (/avc|h264/.test(s)) return "h264";
+    return "unknown";
+  }
+
   function tiersOf(model) {
     const list = Array.isArray(model.video_list) ? model.video_list : [];
     const tiers = [];
@@ -278,7 +288,7 @@ export function createOfficial({ register, deriveContentKey } = {}) {
           contentKey = null; // 派生失败说明该档不是 CENC，按明文处理
         }
       }
-      const codec = /bytevc1|bytevc2|hev|hvc/i.test(String(meta.codec_type || "")) ? "hevc" : "h264";
+      const codec = codecOf(meta.codec_type);
       tiers.push({
         key,
         label: nominal + "P",
@@ -306,7 +316,10 @@ export function createOfficial({ register, deriveContentKey } = {}) {
     if (!tiers.length) return null;
     const wanted = String(quality || "auto").toLowerCase();
     if (wanted === "compat") return null;
-    if (wanted === "auto") return tiers[0];
+    if (wanted === "auto") {
+      // 默认档优先给浏览器能解的（HEVC / H.264）；全是 VVC 时才退回最高档。
+      return tiers.find((tier) => tier.codec !== "vvc") || tiers[0];
+    }
     const exact = tiers.find((tier) => tier.key === wanted);
     if (exact) return exact;
     const height = Number(wanted.replace(/p$/, ""));

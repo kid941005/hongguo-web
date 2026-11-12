@@ -1084,9 +1084,10 @@
         var active = state.playKind === 'native'
           ? (o.key != null && o.key === state.qualityKey)
           : ((o.levelIndex != null && o.levelIndex === state.quality) || (o.levelIndex === -1 && state.quality < 0));
-        d.className = 'qitem' + (active ? ' active' : '');
-        d.textContent = o.label;
-        d.addEventListener('click', function () { selectQuality(o); });
+        var dead = o.codec === 'vvc';
+        d.className = 'qitem' + (active ? ' active' : '') + (dead ? ' disabled' : '');
+        d.textContent = o.label + (dead ? '（H.266 不支持）' : '');
+        if (!dead) d.addEventListener('click', function () { selectQuality(o); });
         menu.appendChild(d);
       });
     }
@@ -1129,6 +1130,10 @@
     // native 直链（红果官方多档）：换 src 重载，保留播放进度。
     if (state.playKind === 'native' && o && o.url) {
       if (o.key === state.qualityKey) { toast('已是 ' + o.label); return; }
+      if (o.codec === 'vvc') {
+        toast('该档位是 H.266(VVC) 编码，浏览器无法解码');
+        return;
+      }
       if (o.codec === 'hevc' && !hevcSupported()) {
         toast('当前浏览器不支持 HEVC 编码，该档位无法播放');
         return;
@@ -1148,7 +1153,7 @@
   // 兼容旧调试钩子：无多档时提示，有 HLS 多档时在档位间循环。
   function cycleQuality() {
     if (state.playKind === 'native' && (state.qualityOptions || []).length > 1) {
-      var nat = state.qualityOptions;
+      var nat = state.qualityOptions.filter(function (o) { return o.codec !== 'vvc'; });
       var cur = -1;
       for (var i = 0; i < nat.length; i++) if (nat[i].key === state.qualityKey) cur = i;
       selectQuality(nat[(cur + 1) % nat.length]);

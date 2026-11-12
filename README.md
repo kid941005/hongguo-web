@@ -302,7 +302,7 @@ var spider = {
 | GET | `/api/play/fallback?source=&id=&index=` | 播放失败时的替代源：按剧名跨源匹配，返回 `{candidates:[{source,name,id,title,episodeCount,targetIndex,episodeName,score}]}`（最多 3 个） |
 | GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer，`token` 为应用访问口令） |
 | GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带上 token） |
-| GET/HEAD | `/api/stream/:epId?q=&token=` | 内置红果分集流（服务端解密 + Range）；`q` 可选 `auto`（最高档）/`1080p`/`720p`/`540p`/`480p`/`360p`/`compat`（官网 360P H.264 兜底），响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位 |
+| GET/HEAD | `/api/stream/:epId?q=&token=` | 内置红果分集流（服务端解密 + Range）；`q` 可选 `auto`（最高可播档）/`1080p`（HEVC）/`720p`/`540p`/`480p`/`360p`（H.266/VVC，浏览器解不了）/`compat`（官网 360P H.264 兜底），响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码 |
 
 个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需要登录，请求头带 `X-Auth-Token: <token>`；应用级 `TOKEN` 支持 `Authorization: Bearer` 或 `?token=`（媒体/流地址由前端自动追加）。
 
@@ -313,12 +313,12 @@ var spider = {
 - **内置红果搜索**：主通道是官网搜索页自己用的 JSON 接口 `GET /api/search/result?query=`（只校验 UA，不依赖 App 签名，也不依赖已 CSR 化的搜索页 SSR），响应里带 `channel: "web"`、`total`、`hasMore`。该通道失败时才降级为首页推荐池检索（`fallback: true`、`channel: "pool"`，结果不全）。
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
-- **红果内置流提供 360P–1080P 多档，但高清档是 HEVC**：服务端用 Android App 签名（x-argus + x-ladon）直连 `multi_video_model/v1` 取官方多档，拿到 CENC 加密的 HEVC 流后在服务端解密、按 Range 转发（`/api/stream/<分集id>?q=1080p`）。播放器会先探测浏览器 HEVC 解码能力：支持（Safari、装了 HEVC 扩展的 Edge、部分安卓）就用最高档，不支持（Chrome/Windows 默认）自动落到 360P H.264 兼容线路，也可以在清晰度菜单里手动选。官方签名接口若再次变动，服务端自动回落官网明文 360P，不影响播放。
+- **红果内置流提供 1080P（HEVC）与 360P（H.264）两档**：服务端用 Android App 签名（x-argus + x-ladon）直连 `multi_video_model/v1` 取官方多档，拿到 CENC 加密流后在服务端解密、按 Range 转发（`/api/stream/<分集id>?q=1080p`）。播放器先探测浏览器 HEVC 解码能力：支持（Safari、装了 HEVC 扩展的 Edge/Chrome、部分安卓）用 1080P，不支持（Chrome/Windows 默认无 HEVC 扩展）自动落到 360P H.264 兼容线路，菜单里也可手动选。注意官方 360P–720P 档位是 **H.266/VVC** 编码，目前没有任何浏览器能解码，服务端直接不列入菜单（`?q=720p` 等仍可直取，仅对能解 VVC 的播放器有用）。官方签名接口若再次变动，服务端自动回落官网明文 360P，不影响播放。
 - **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路；若两条都失败，连续 3 次取流失败会熔断 45 秒并在播放器显示「重试 / 换数据源」，无需重启容器。
 - **降级换源依赖别家也有同名剧**：替代源是在其它源的搜索结果里按标题相似度找的，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。
-- **清晰度取决于源**：分辨率徽标始终显示**实际解码分辨率**（权威）。只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有档位可切；单码率 HLS 与 MP4 直链的可选档位只有一项，菜单里会明确标注「该源仅此一种清晰度」，不会伪造档位。红果内置源是特例：官方多档（360P–1080P）由服务端解密后以 `?q=<档位>` 暴露，菜单会列出真实档位，并额外提供一档「360P 兼容」；浏览器不支持 HEVC 时会自动选它。
+- **清晰度取决于源**：分辨率徽标始终显示**实际解码分辨率**（权威）。只有提供 master playlist（多 `#EXT-X-STREAM-INF`）的 HLS 源才有档位可切；单码率 HLS 与 MP4 直链的可选档位只有一项，菜单里会明确标注「该源仅此一种清晰度」，不会伪造档位。红果内置源是特例：官方档位由服务端解密后以 `?q=<档位>` 暴露，菜单列出浏览器能解的档位（1080P HEVC）并额外提供一档「360P 兼容」；浏览器不支持 HEVC 时会自动选它。
 - **推荐页首次加载慢**：需要抓取红果四个榜单共 20 页（约 10 秒），结果在服务端缓存 10 分钟，之后翻页很快；单页抓取失败只丢当页，不影响整体。
 - **聚合搜索耗时**：各源并发、先返回先展示，不会等最慢的源；单源聚合上限 12 秒（内置红果 30 秒），超时或失败只丢该源并在提示条注明。模板/示例源（`template`、`maccms`）默认不参与聚合，避免 404 与示例数据噪音。
 - **JS 源默认禁止访问内网**：恶意源可能借 `fetch` 探测内网，默认只允许公网 http(s)；确有内网源自建需求时设 `ALLOW_PRIVATE_FETCH=1`。
