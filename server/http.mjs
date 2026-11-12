@@ -132,6 +132,18 @@ export function createServer({ provider, sources, catalog, users = null, monitor
         playback: monitor ? monitor.snapshot() : null,
       })],
 
+    // ---- 运维：一键清缓存 ----
+    // 上游风控/签名变化时的第一步动作：清掉首页 SWR、推荐池、vendor 四层缓存与播放模型缓存。
+    // 鉴权沿用全局 TOKEN（dispatch 里对 /api/ 已统一校验），未设 TOKEN 的部署即本机自用。
+    ["POST", /^\/api\/cache\/clear$/, ({ json }) => {
+      const cleared = {
+        catalog: typeof catalog.clearCache === "function" ? catalog.clearCache() : null,
+        provider: typeof provider.clearCache === "function" ? provider.clearCache() : null,
+      };
+      console.log(JSON.stringify({ event: "cache_clear", cleared }));
+      return json(200, { ok: true, cleared });
+    }],
+
     // ---- 播放通道监控告警 ----
     ["GET", /^\/api\/alerts$/, ({ json }) =>
       json(200, monitor ? monitor.snapshot() : { enabled: false, status: "disabled", alerts: [] })],
@@ -377,6 +389,22 @@ export function createServer({ provider, sources, catalog, users = null, monitor
   }
 
   return http.createServer((req, res) => {
+    const startedAt = Date.now();
+    // 访问日志：只记 API 与失败的静态请求。一个页面几十个静态资源，全记会把日志刷爆，
+    // 而 4xx/5xx 的静态请求（缺文件、路径拼错）恰恰是最需要看到的。
+    res.on("finish", () => {
+      let pathname = req.url || "/";
+      try { pathname = new URL(pathname, "http://localhost").pathname; } catch { /* 非法 URL 原样记 */ }
+      const isApi = pathname.startsWith("/api/");
+      if (!isApi && res.statusCode < 400) return;
+      console.log(JSON.stringify({
+        event: "access",
+        method: req.method,
+        path: pathname,
+        status: res.statusCode,
+        ms: Date.now() - startedAt,
+      }));
+    });
     // 统一安全响应头（静态页、媒体、流也覆盖）。
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("referrer-policy", "no-referrer");

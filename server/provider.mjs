@@ -408,6 +408,28 @@ export const provider = {
     METRICS.lastInvalidationAt = Date.now();
     return true;
   },
+  // 运维：一次清空 vendor 的四层缓存 + 官方播放模型缓存 + 推荐池。
+  // 上游风控/签名变化时，这是排查的第一步：比进容器删文件快一个量级。
+  clearCache() {
+    const cleared = {};
+    for (const [name, cache] of [
+      ["stream", api.streamCache],
+      ["videoInfo", api.videoInfoCache],
+      ["page", api.pageCache],
+      ["appSearch", api.appSearchCache],
+    ]) {
+      if (!(cache instanceof Map)) continue;
+      cleared[name] = cache.size;
+      cache.clear();
+    }
+    cleared.official = typeof official.clearCache === "function" ? official.clearCache() : 0;
+    cleared.recommend = recommendPool ? recommendPool.length : 0;
+    recommendPool = null;
+    recommendPoolAt = 0;
+    METRICS.cacheClears += 1;
+    METRICS.lastCacheClearAt = Date.now();
+    return cleared;
+  },
   metrics() {
     return {
       stream: {
@@ -422,6 +444,8 @@ export const provider = {
         lastOfficialErrorAt: METRICS.lastOfficialErrorAt,
         invalidations: METRICS.invalidations,
         lastInvalidationAt: METRICS.lastInvalidationAt,
+        cacheClears: METRICS.cacheClears,
+        lastCacheClearAt: METRICS.lastCacheClearAt,
       },
       official: official.stats,
       breaker: {
@@ -454,6 +478,8 @@ const METRICS = {
   officialFails: 0, lastOfficialError: "", lastOfficialErrorAt: 0,
   // 首块校验失败后清缓存重取的次数（A3）：持续增长说明上游签名/CDN 在频繁变化。
   invalidations: 0, lastInvalidationAt: 0,
+  // 手动清缓存次数（A6）：排查上游风控时最常用的运维动作。
+  cacheClears: 0, lastCacheClearAt: 0,
 };
 
 const CACHE_TTL = 300000;

@@ -271,6 +271,7 @@ var spider = {
 | GET | `/api/metrics` | 运行指标：uptime、RSS、红果取流尝试/失败/空响应次数、熔断状态、官网/App 两条通道成功失败计数（`channels`）与监控快照（`playback`） |
 | GET | `/api/alerts` | 播放通道监控快照：`status`（`ok`/`degraded`/`down`/`unknown`）、通道、失败次数、最近告警（最多 50 条） |
 | POST | `/api/alerts/check` | 立即跑一次通道探针（同步返回最新快照） |
+| POST | `/api/cache/clear` | 一键清缓存（排查上游风控/签名变化的第一步）：清首页 SWR、推荐池、vendor 四层缓存与官方播放模型缓存，返回各层清掉的条目数 |
 | POST | `/api/auth/register` | 注册：`{ "username": "…", "password": "…" }` → `{ token, user }` |
 | POST | `/api/auth/login` | 登录：同上 → `{ token, user }` |
 | POST | `/api/auth/logout` | 注销当前令牌 |
@@ -300,11 +301,13 @@ var spider = {
 | GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集） |
 | GET | `/api/play?source=&flag=&id=` | 取播放地址（返回 `{type,url}`；内置红果额外带 `quality:{options:[{key,label,height,codec,url}],note}` 多档清单） |
 | GET | `/api/play/fallback?source=&id=&index=` | 播放失败时的替代源：按剧名跨源匹配，返回 `{candidates:[{source,name,id,title,episodeCount,targetIndex,episodeName,score}]}`（最多 3 个） |
-| GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer，`token` 为应用访问口令） |
+| GET | `/api/media?u=&r=&token=` | 媒体透传（支持 Range，`r` 为 Referer，`token` 为应用访问口令）；图片请求（`Accept: image/*` 或图片后缀）上游失败时回内置占位图 **200**，响应头 `x-media-fallback` 标明原因 |
 | GET | `/api/hls?u=&r=&token=` | HLS 清单重写（分片走 `/api/media`，自动带上 token） |
 | GET/HEAD | `/api/stream/:epId?q=&token=` | 内置红果分集流（服务端解密 + Range）；`q` 可选 `auto`（最高可播档）/`1080p`（HEVC）/`720p`/`540p`/`480p`/`360p`（H.266/VVC，浏览器解不了）/`compat`（官网 360P H.264 兜底），响应头 `x-stream-quality`、`x-stream-codec` 标明实际档位与编码 |
 
 个人数据接口（`/api/me/*`、`/api/auth/me`、`/api/auth/logout`）需要登录，请求头带 `X-Auth-Token: <token>`；应用级 `TOKEN` 支持 `Authorization: Bearer` 或 `?token=`（媒体/流地址由前端自动追加）。
+
+服务端访问日志：每个 `/api/*` 请求与失败的静态请求都会写一条 `{"event":"access",method,path,status,ms}`，排查慢接口直接按 `ms` 排序即可（静态资源 200 不记，避免刷屏）。
 
 所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON` / `BAD_URL`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`RATE_LIMITED`（429，注册/登录过于频繁）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
 

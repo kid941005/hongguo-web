@@ -627,6 +627,16 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
+  // 运维：清空目录层缓存（首页 SWR 各页 + 推荐页上次成功结果）。
+  // homePending 里的在途请求不清：清掉反而会让同一次刷新跑两份，它自己结束就会出队。
+  function clearCache() {
+    const homes = homeCache.size;
+    homeCache.clear();
+    const recommend = recommendGood ? 1 : 0;
+    recommendGood = null;
+    return { homes, recommend };
+  }
+
   // 启动预热：把内置红果推荐池先抓进缓存，避免用户第一次搜索等 5–10 秒。
   function warmup() {
     return builtinSearch.warmup ? builtinSearch.warmup() : Promise.resolve();
@@ -733,5 +743,5 @@ export function createCatalog({ provider, sources }) {
     };
   }
 
-  return { home, category, search, searchAll, recommend, detail, play, playFallback, health, warmup };
+  return { home, category, search, searchAll, recommend, detail, play, playFallback, health, warmup, clearCache };
 }

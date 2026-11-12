@@ -342,6 +342,13 @@ export function createOfficial({ register, deriveContentKey } = {}) {
       stats.invalidated += 1;
       return true;
     },
+    // 运维：清空本模块的播放模型缓存（含失败缓存）。返回清掉的条目数，
+    // 用于 /api/cache/clear 的回执，方便确认「清缓存」真的清到了东西。
+    clearCache() {
+      const size = cache.size;
+      cache.clear();
+      return size;
+    },
     async info(epId) {
       const model = await fetchModel(epId);
       const tiers = tiersOf(model);

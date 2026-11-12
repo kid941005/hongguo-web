@@ -31,8 +31,46 @@ function boundRange(value) {
   return "bytes=" + start + "-" + (start + RANGE_CHUNK - 1);
 }
 
+// 图片代理失败时回内置占位图（200）而不是错误码：
+// 海报上游 403（如牛牛的图床）经代理变成 502 后，浏览器里是整屏破图 + 控制台一片红；
+// 回一张灰底占位图，用户看到的只是「这张海报没有」，页面其余部分照常。
+const FALLBACK_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="320" viewBox="0 0 240 320">' +
+  '<rect width="240" height="320" fill="#1b1b22"/>' +
+  '<rect x="60" y="130" width="120" height="8" rx="4" fill="#33333d"/>' +
+  '<rect x="80" y="152" width="80" height="8" rx="4" fill="#2a2a33"/>' +
+  '<text x="120" y="196" font-family="sans-serif" font-size="16" fill="#4a4a57" text-anchor="middle">暂无海报</text>' +
+  "</svg>";
+
+const IMAGE_PATH = /\.(?:jpe?g|png|webp|gif|avif|bmp|ico)$/i;
+
+// 是不是图片请求：先看 Accept（<img> 会带 image/*），再看路径后缀（部分源用无后缀的图床地址）。
+function wantsImage(req, url) {
+  const accept = String(req.headers.accept || "");
+  if (/image\//i.test(accept)) return true;
+  try {
+    return IMAGE_PATH.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function sendFallbackImage(res, reason) {
+  const body = Buffer.from(FALLBACK_SVG);
+  res.writeHead(200, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "content-length": body.length,
+    // 短缓存：上游恢复后一分钟内就能换回真海报，不会一直占位。
+    "cache-control": "public, max-age=60",
+    "access-control-allow-origin": "*",
+    "x-media-fallback": String(reason || "error").slice(0, 40),
+  });
+  res.end(body);
+}
+
 // 透传 Range 的视频代理：浏览器只连本站，避免 CORS 与防盗链。
 export async function proxyMedia(req, res, { url, referer, ua }) {
+  const image = wantsImage(req, url);
   const userAgent = cleanUa(ua);
   const headers = upstreamHeaders(referer, userAgent ? { "user-agent": userAgent } : null);
   if (req.headers.range) headers.range = boundRange(req.headers.range);
@@ -48,12 +86,15 @@ export async function proxyMedia(req, res, { url, referer, ua }) {
     });
   } catch (error) {
     if (error && error.code === "BAD_URL") throw error;
+    // 图片请求连不上上游时回占位图，别让整排海报因为一个图床挂掉而全红。
+    if (image) return sendFallbackImage(res, "error");
     throw fail(error && error.code === "TIMEOUT" ? "TIMEOUT" : "UPSTREAM", "媒体上游请求失败");
   }
 
   // 上游 4xx/5xx（416 除外）不是可透传的媒体内容，直接按代理失败处理，避免浏览器把错误页当视频。
   if (!upstream.ok && upstream.status !== 416) {
     try { upstream.discard(); } catch {}
+    if (image) return sendFallbackImage(res, "http-" + upstream.status);
     throw fail("UPSTREAM", "媒体上游返回 HTTP " + upstream.status);
   }
 
