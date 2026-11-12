@@ -1214,10 +1214,20 @@
     var fb = $('btnPlayerFallback'); if (fb) fb.classList.add('hidden');
     state.fallback = null;
   }
-  function showPlayerError(msg) {
+  function showPlayerError(msg, kind) {
     clearPlayWatchdog();
     var box = $('playerError'); if (!box) return;
     $('playerErrorText').textContent = msg || '播放失败，请重试或切换数据源。';
+    var retry = $('btnPlayerRetry');
+    var compat = optionByKey('compat');
+    var canCompat = !!(compat && compat.url && state.qualityKey !== 'compat');
+    // 编码类问题（bvc2/hevc）重试同一档没有意义：按钮改成「切到 360P 兼容」，没有兼容档就干脆不给重试。
+    if (retry) {
+      var coding = kind === 'bvc2' || kind === 'hevc';
+      retry.dataset.mode = coding && canCompat ? 'compat' : 'retry';
+      retry.textContent = coding && canCompat ? '切到 360P 兼容' : '重试';
+      retry.classList.toggle('hidden', coding && !canCompat);
+    }
     box.classList.remove('hidden');
     loadFallback(); // 顺手找同剧的其它源，播放失败时给一条能直接续上的路
   }
@@ -1334,6 +1344,7 @@
     updateQualityBtn();
     destroyHls();
     hidePlayerError();
+    clearDiag();
     // 从直链切到 HLS（或反过来）时先清掉旧的 src，避免残留地址干扰新的播放源。
     v.removeAttribute('src');
     try { v.load(); } catch (e) {}
@@ -1455,6 +1466,67 @@
     return true;
   }
 
+  // ---- 播放失败诊断（B6）：把「黑屏 / 报错」分成四种可操作的原因 ----
+  // no-source：流本身取不到（502/503/网络断）→ 重试有意义
+  // bvc2：档位是 H.266/VVC，设备解不了 → 重试无意义，应切兼容档或换源
+  // hevc：容器与音轨能解、视频轨解不了（有声音没画面，往往不触发 error）→ 同样切兼容档
+  // playable：地址其实可用，错误另有原因 → 仍给重试
+  var diagTimers = [];
+  function clearDiag() { while (diagTimers.length) clearTimeout(diagTimers.pop()); }
+  function currentCodec() {
+    var opt = optionByKey(state.qualityKey);
+    return (opt && opt.codec) || '';
+  }
+  // 用 1 字节 Range 探一次真地址，只为拿 HTTP 状态（服务端只解这一小块，代价很小）。
+  function probeStream(url) {
+    if (!url) return Promise.resolve({ ok: false, status: 0 });
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 4000) : null;
+    return fetch(url, { headers: { Range: 'bytes=0-1' }, cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) {
+        var status = r.status;
+        return r.arrayBuffer().then(function () { return status; }, function () { return status; });
+      })
+      .then(function (status) { return { ok: status === 200 || status === 206, status: status }; })
+      .catch(function () { return { ok: false, status: 0 }; })
+      .then(function (res) { if (timer) clearTimeout(timer); return res; });
+  }
+  function classifyPlayback(v, probe) {
+    if (probe && probe.status === 415) return 'bvc2'; // 服务端明确说「这个编码浏览器解不了」
+    if (probe && !probe.ok) return 'no-source';
+    if (!v) return 'playable';
+    if (v.videoWidth > 0) return 'playable';
+    return currentCodec() === 'vvc' ? 'bvc2' : 'hevc';
+  }
+  var DIAG_TEXT = {
+    'no-source': function (probe) {
+      return '内容源暂时不可用（' + (probe && probe.status ? 'HTTP ' + probe.status : '连接失败') + '），可稍后重试或切换数据源。';
+    },
+    bvc2: function () { return '当前设备不支持该视频编码（H.266/VVC），重试同一档没有意义，请切到 360P 兼容线路或换源。'; },
+    hevc: function () { return '当前设备解不了这一档画面（常见于 HEVC 有声音无画面），请切到 360P 兼容线路或换源。'; },
+    playable: function () { return '播放异常，但视频地址本身可用，可重试或换一集。'; },
+  };
+  // 阶梯（同档重试 → 降档）都走完仍失败时调用：先探地址，再按分类给具体话术。
+  function diagnoseAndReport(v, fallbackMsg) {
+    var url = (v && (v.currentSrc || v.getAttribute('src'))) || '';
+    probeStream(url).then(function (probe) {
+      var kind = classifyPlayback(v, probe);
+      if (kind === 'playable') { showPlayerError(fallbackMsg || DIAG_TEXT.playable(probe), 'playable'); return; }
+      showPlayerError(DIAG_TEXT[kind](probe), kind);
+      toast(kind === 'no-source' ? '内容源暂时不可用' : '当前设备解不了该编码，建议切 360P 兼容');
+    });
+  }
+  // 有音无画的兜底检查：loadeddata +400ms、loadedmetadata +1200ms 各查一次，仍没画面就提示换档。
+  function armStallCheck(v, delay) {
+    diagTimers.push(setTimeout(function () {
+      if (state.playKind !== 'native' || state.hevcFallback) return;
+      if (!v || v.paused || v.readyState < 2 || v.videoWidth > 0) return;
+      var kind = classifyPlayback(v, null);
+      if (kind === 'playable') return;
+      showPlayerError(DIAG_TEXT[kind](null), kind);
+    }, delay));
+  }
+
   function bindPlayerEvents() {
     var v = $('video');
     v.addEventListener('loadedmetadata', function () {
@@ -1472,6 +1544,13 @@
       state.silentSeek = false;
       if (state.switching) { state.switching = false; updateQualityBtn(); }
       prefetchNext();
+      clearDiag();
+      armStallCheck(v, 1200);
+    });
+    // 首帧就绪的早检查：有音无画时 videoWidth 一直是 0，早一点提示能少等几秒。
+    v.addEventListener('loadeddata', function () {
+      clearDiag();
+      armStallCheck(v, 400);
     });
     v.addEventListener('timeupdate', function () {
       if (!state.histKey) return;
@@ -1495,9 +1574,11 @@
     // HEVC 在 Chrome/Edge 上常见「有声音没画面」：容器与音轨能解，视频轨不支持，且不触发 error。
     // 播了 2 秒还拿不到 videoWidth 就判定该档解不出来，回落 360P 兼容线路。
     v.addEventListener('timeupdate', function () {
-      if (state.playKind !== 'native' || state.hevcFallback) return;
+      if (state.playKind !== 'native') return;
+      if (v.videoWidth > 0) { clearDiag(); return; }
+      if (state.hevcFallback) return;
       if (v.paused || v.readyState < 2) return;
-      if (v.currentTime < 2 || v.videoWidth > 0) return;
+      if (v.currentTime < 2) return;
       var compat = optionByKey('compat');
       if (!compat || !compat.url) return;
       state.hevcFallback = true;
@@ -1526,9 +1607,10 @@
           return;
         }
       }
-      // 第三级：阶梯走完还失败，给出人能看懂的原因，别只弹浏览器的英文媒体错误。
+      // 第三级：阶梯走完还失败，探一次真地址再给结论——「源挂了」和「设备解不了」要分开说，
+      // 否则用户对着编码问题一直点重试，或者对着源故障去切清晰度。
       var msg = '播放失败：' + label + '，可尝试切换数据源或换一集';
-      showPlayerError(msg);
+      diagnoseAndReport(v, msg);
       toast(msg);
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
@@ -1651,6 +1733,7 @@
     var v = $('video');
     closeQualityMenu();
     hidePlayerError();
+    clearDiag();
     state.autoNextLatch = false;
     saveProgress(v);
     try { v.pause(); } catch (e) {}
@@ -1968,7 +2051,17 @@
   }
   $('btnBack').addEventListener('click', function () { setView('home'); });
   $('btnClosePlayer').addEventListener('click', closePlayer);
-  $('btnPlayerRetry').addEventListener('click', retryPlayback);
+  $('btnPlayerRetry').addEventListener('click', function () {
+    var btn = $('btnPlayerRetry');
+    if (btn && btn.dataset.mode === 'compat') {
+      var compat = optionByKey('compat');
+      if (compat && compat.url) {
+        hidePlayerError();
+        if (switchNativeQuality(compat)) { toast('已切换到 360P 兼容线路'); return; }
+      }
+    }
+    retryPlayback();
+  });
   $('btnPlayerSwitch').addEventListener('click', switchPlaybackSource);
   $('btnPlayerFallback').addEventListener('click', useFallback);
   $('video').addEventListener('error', onVideoError);
@@ -2071,6 +2164,7 @@
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
     mergeServerHistory: mergeServerHistory, closeMenus: closeMenus,
     selectQuality: selectQuality, switchNativeQuality: switchNativeQuality,
+    diagnose: { probe: probeStream, classify: classifyPlayback, report: diagnoseAndReport, arm: armStallCheck, clear: clearDiag },
     prefetch: { cache: prefetchCache, el: function () { return prefetchEl; }, next: prefetchNext, trim: trimPrefetch }
   };
 
