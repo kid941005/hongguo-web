@@ -6,35 +6,82 @@ import axios from "axios";
 import { fail } from "./errors.mjs";
 import { createOfficial } from "./official.mjs";
 
-// Trusted, pinned GPL source. This is a compatibility wrapper, not a sandbox for user scripts.
-const source = fs.readFileSync(
-  new URL("./vendor/hongguo.cjs", import.meta.url),
-  "utf8"
-);
-const context = vm.createContext({
-  require: (name) => {
-    if (name === "node:crypto") return crypto;
-    if (name === "node:zlib") return zlib;
-    throw new Error("Unsupported module");
-  },
-  Buffer,
-  URL,
-  URLSearchParams,
-  log: () => {},
-  setResult: (value) => value,
-  axios: axios.create({
-    timeout: 30000,
-    maxContentLength: 16 * 1024 * 1024,
-    maxBodyLength: 1024 * 1024,
-  }),
-});
-vm.runInContext(
-  source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, websiteSearch, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats, registerPlaybackDevice, deriveContentKey};",
-  context,
-  { timeout: 5000 }
-);
-const api = context.api;
+// ---- vendored 源加载（A1：显式依赖注入 + 导出白名单） ----
+// server/vendor/hongguo.cjs 与 drpys 上游逐字节一致，不在这里改源本体；
+// 加载点收敛成一处 loadVendor()，避免「谁都能往 vm 里塞东西」。
+// 依赖只给真正需要的：node:crypto / node:zlib 与一个关掉代理的 axios 实例。
+// 导出只暴露本服务实际调用的成员，新增调用必须先加进 VENDOR_EXPORTS，否则加载即失败。
+const VENDOR_FILE = new URL("./vendor/hongguo.cjs", import.meta.url);
+
+const VENDOR_EXPORTS = [
+  "categoryPage",
+  "categoryData",
+  "itemToCard",
+  "appSearchPage",
+  "websiteSearch",
+  "routerData",
+  "resolveStream",
+  "prepareHeader",
+  "remoteRange",
+  "decryptPartial",
+  "streamCache",
+  "videoInfoCache",
+  "pageCache",
+  "appSearchCache",
+  "rankPageRich",
+  "rule",
+  "CATEGORIES",
+  "CATEGORY_CONFIG",
+  "FILTERS",
+  "channelStats",
+  "registerPlaybackDevice",
+  "deriveContentKey",
+];
+
+function loadVendor() {
+  const source = fs.readFileSync(VENDOR_FILE, "utf8");
+  const context = vm.createContext({
+    require: (name) => {
+      if (name === "node:crypto") return crypto;
+      if (name === "node:zlib") return zlib;
+      throw new Error("Unsupported module: " + name);
+    },
+    Buffer,
+    URL,
+    URLSearchParams,
+    log: () => {},
+    setResult: (value) => value,
+    // proxy:false 是关键：宿主机配了 HTTP(S)_PROXY 时 axios 默认会走代理，
+    // 上游是字节系 CDN，经代理只会拿到 403 / 空正文，表现成「播放源不可用」。
+    axios: axios.create({
+      timeout: 30000,
+      maxContentLength: 16 * 1024 * 1024,
+      maxBodyLength: 1024 * 1024,
+      proxy: false,
+    }),
+  });
+  vm.runInContext(
+    source + "\nthis.api = {" + VENDOR_EXPORTS.join(", ") + "};",
+    context,
+    { timeout: 5000 }
+  );
+  const loaded = context.api || {};
+  // 上游文件被替换/改名时立刻失败，而不是等到某个接口调用点抛 "xxx is not a function"。
+  const missing = VENDOR_EXPORTS.filter((name) => loaded[name] === undefined);
+  if (missing.length) throw new Error("vendor 导出缺失：" + missing.join(", "));
+  console.log(
+    JSON.stringify({
+      event: "vendor_loaded",
+      file: "server/vendor/hongguo.cjs",
+      bytes: Buffer.byteLength(source),
+      sha256_12: crypto.createHash("sha256").update(source).digest("hex").slice(0, 12),
+      exports: VENDOR_EXPORTS.length,
+    })
+  );
+  return loaded;
+}
+
+const api = loadVendor();
 // 官方播放模型（多档 HEVC）：设备身份注册与内容密钥派生都复用 vendor 里已验证的实现。
 const official = createOfficial({
   register: () => api.registerPlaybackDevice(),
