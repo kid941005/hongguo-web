@@ -84,8 +84,9 @@ export function createStaticHandler(webDir) {
     await new Promise((resolve, reject) => {
       const source = fs.createReadStream(real);
       source.on("error", reject);
-      res.on("close", () => source.destroy());
       source.on("end", resolve);
+      // 客户端提前断开时销毁读流并结束等待，否则这个 Promise 会一直悬着。
+      res.on("close", () => { source.destroy(); resolve(); });
       source.pipe(res);
     });
   };
