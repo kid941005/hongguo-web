@@ -29,6 +29,8 @@ const STATUS = {
   UPSTREAM: 502,
   UPSTREAM_ERROR: 502,
   UPSTREAM_EMPTY: 503,
+  // 熔断冷却期：不是「上游坏了」，而是「我们主动不打上游」，语义上是「稍后重试」。
+  UPSTREAM_COOLDOWN: 503,
 };
 
 const GENERIC_MESSAGE = "内容源暂不可用，请稍后重试";

@@ -309,7 +309,7 @@ var spider = {
 
 服务端访问日志：每个 `/api/*` 请求与失败的静态请求都会写一条 `{"event":"access",method,path,status,ms}`，排查慢接口直接按 `ms` 排序即可（静态资源 200 不记，避免刷屏）。
 
-所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON` / `BAD_URL`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`RATE_LIMITED`（429，注册/登录过于频繁）、`BUSY`（503，并发流已满）、`TIMEOUT`（504），其余上游问题为 502。
+所有错误统一返回 `{ "error": "…", "code": "…" }`。常见 code：`BAD_INPUT` / `BAD_JSON` / `BAD_URL`（400）、`USER_EXISTS`（409）、`UNAUTHORIZED`（401）、`PROTECTED`（403）、`NOT_FOUND`（404）、`RATE_LIMITED`（429，注册/登录过于频繁）、`BUSY`（503，并发流已满）、`UPSTREAM_COOLDOWN`（503，上游限流熔断冷却中，稍后重试即可）、`TIMEOUT`（504），其余上游问题为 502。
 
 ## 7. 已知限制
 
@@ -317,7 +317,7 @@ var spider = {
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
 - **红果内置流提供 1080P（HEVC）与 360P（H.264）两档**：服务端用 Android App 签名（x-argus + x-ladon）直连 `multi_video_model/v1` 取官方多档，拿到 CENC 加密流后在服务端解密、按 Range 转发（`/api/stream/<分集id>?q=1080p`）。播放器先探测浏览器 HEVC 解码能力：支持（Safari、装了 HEVC 扩展的 Edge/Chrome、部分安卓）用 1080P，不支持（Chrome/Windows 默认无 HEVC 扩展）自动落到 360P H.264 兼容线路，菜单里也可手动选。注意官方 360P–720P 档位是 **H.266/VVC** 编码，目前没有任何浏览器能解码，服务端直接不列入菜单（`?q=720p` 等仍可直取，仅对能解 VVC 的播放器有用）。官方签名接口若再次变动，服务端自动回落官网明文 360P，不影响播放。
-- **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路；若两条都失败，连续 3 次取流失败会熔断 45 秒并在播放器显示「重试 / 换数据源」，无需重启容器。
+- **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路。连续 3 次被上游拒绝（空响应 / 风控 / 403 / 429 等）即熔断 30 秒：冷却期内请求直接快速失败（`503 UPSTREAM_COOLDOWN`，不再白等十几秒上游超时），到期只放行一个探测请求，探测再失败冷却翻倍（上限 5 分钟），探测成功立即恢复。官方通道与兼容通道各自独立熔断，指标见 `/api/metrics` 的 `breakers`。
 - **降级换源依赖别家也有同名剧**：替代源是在其它源的搜索结果里按标题相似度找的，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
 - **PWA 需要安全上下文**：Service Worker 只在 `https://` 或 `http://localhost` 下启用；用局域网 IP 的纯 HTTP 访问时页面照常可用，但没有离线缓存、也不能安装。

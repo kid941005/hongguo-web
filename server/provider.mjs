@@ -5,6 +5,16 @@ import zlib from "node:zlib";
 import axios from "axios";
 import { fail } from "./errors.mjs";
 import { createOfficial } from "./official.mjs";
+import {
+  acquire,
+  breakerSeconds,
+  breakerState,
+  breakerSummary,
+  createBreaker,
+  releaseProbe,
+  reportOk,
+  reportReject,
+} from "./breaker.mjs";
 
 // ---- vendored 源加载（A1：显式依赖注入 + 导出白名单） ----
 // server/vendor/hongguo.cjs 与 drpys 上游逐字节一致，不在这里改源本体；
@@ -293,35 +303,44 @@ export const provider = {
       api.videoInfoCache.delete(id);
     }
     if (wanted !== "compat") {
-      try {
-        const picked = await official.stream(id, wanted);
-        const prepared = await api.prepareHeader(picked.stream);
-        if (track) {
-          STREAM_BREAKER.fails = 0;
-          STREAM_BREAKER.openUntil = 0;
+      const waitOfficial = acquire(BREAKERS.official);
+      if (waitOfficial) {
+        // 冷却期不再打官方通道：以前每次播放都要先等满 12s 模型超时才回落 360P。
+        METRICS.officialSkipped += 1;
+      } else {
+        try {
+          const picked = await official.stream(id, wanted);
+          const prepared = await api.prepareHeader(picked.stream);
+          reportOk(BREAKERS.official);
+          return {
+            total: prepared.total,
+            channel: "official",
+            quality: picked.tier.key,
+            codec: picked.tier.codec,
+            chunk: async (start, end) =>
+              api.decryptPartial(
+                (await api.remoteRange(picked.stream, start, end)).data,
+                start,
+                picked.stream.key,
+                prepared
+              ),
+          };
+        } catch (error) {
+          // 高清通道失败只降级（360P 兜底通常仍可用），但要按同一套判据喂官方通道熔断：
+          // 被风控时连续失败到阈值就拉闸，之后一段时间直接走 360P，不再白等模型超时。
+          const message = String((error && error.message) || error).slice(0, 300);
+          METRICS.officialFails += 1;
+          METRICS.lastOfficialError = message;
+          METRICS.lastOfficialErrorAt = Date.now();
+          if (isUpstreamRejection(message)) reportReject(BREAKERS.official, message);
+          else releaseProbe(BREAKERS.official);
         }
-        return {
-          total: prepared.total,
-          channel: "official",
-          quality: picked.tier.key,
-          codec: picked.tier.codec,
-          chunk: async (start, end) =>
-            api.decryptPartial(
-              (await api.remoteRange(picked.stream, start, end)).data,
-              start,
-              picked.stream.key,
-              prepared
-            ),
-        };
-      } catch (error) {
-        // 高清通道失败只降级，不计入官网通道熔断：360P 兜底通常仍然可用。
-        METRICS.officialFails += 1;
-        METRICS.lastOfficialError = String((error && error.message) || error).slice(0, 300);
-        METRICS.lastOfficialErrorAt = Date.now();
       }
     }
-    if (STREAM_BREAKER.openUntil > Date.now()) {
-      throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用，正在自动恢复，请切换数据源或稍后重试");
+    const waitCompat = acquire(BREAKERS.compat);
+    if (waitCompat) {
+      METRICS.cooldownHits += 1;
+      throw cooldownError(waitCompat);
     }
     if (track) METRICS.attempts += 1;
     // 上游 CDN 偶发 DNS/TLS 抖动（getaddrinfo EAI_AGAIN、socket hang up 等），
@@ -341,10 +360,7 @@ export const provider = {
         resolved = await resolve();
       }
       const { stream, prepared } = resolved;
-      if (track) {
-        STREAM_BREAKER.fails = 0;
-        STREAM_BREAKER.openUntil = 0;
-      }
+      reportOk(BREAKERS.compat);
       return {
         total: prepared.total,
         channel: stream.channel || "app",
@@ -361,27 +377,31 @@ export const provider = {
     } catch (error) {
       const message = String((error && error.message) || error);
       if (track) {
-        STREAM_BREAKER.fails += 1;
-        STREAM_BREAKER.lastError = message;
         METRICS.failures += 1;
         METRICS.lastError = message;
         METRICS.lastErrorAt = Date.now();
       }
-      if (/空响应|video_model|video_tab|device_register|web 播放/.test(message)) {
+      if (isUpstreamRejection(message)) {
         if (track) METRICS.empty += 1;
-        if (track && STREAM_BREAKER.fails >= STREAM_BREAKER_THRESHOLD) {
-          STREAM_BREAKER.openUntil = Date.now() + STREAM_BREAKER_COOLDOWN;
-        }
-        throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用：" + message);
+        const opened = reportReject(BREAKERS.compat, message);
+        const wait = breakerSeconds(BREAKERS.compat);
+        // 刚拉闸时把「多久后自动重试」写进文案：前端不用再猜，也不用额外接口。
+        const tail = opened && wait ? `（${wait} 秒后自动重试）` : "";
+        throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用：" + message + tail);
       }
+      // 网络瞬态不算上游拒绝：清掉探测占位，别让熔断器卡在半开。
+      releaseProbe(BREAKERS.compat);
       throw fail("UPSTREAM_ERROR", "红果播放源异常：" + message);
     }
   },
   // 清晰度清单：给 /api/play 用，失败不抛错（前端只显示 360P 兼容档）。
   // timeoutMs 有上限：/api/play 不能为了菜单把起播拖住。
   async quality(id, timeoutMs = 6000) {
+    const wait = acquire(BREAKERS.official);
+    if (wait) return { tiers: [], expire: 0, error: `上游限流，${wait} 秒后重试` };
     try {
       const info = await withTimeout(official.info(String(id)), timeoutMs, "清晰度查询超时");
+      reportOk(BREAKERS.official);
       return {
         tiers: info.tiers.map((tier) => ({
           key: tier.key,
@@ -394,7 +414,11 @@ export const provider = {
         expire: info.expire,
       };
     } catch (error) {
-      return { tiers: [], expire: 0, error: String((error && error.message) || error) };
+      const message = String((error && error.message) || error);
+      // 与 stream() 同一套判据：被拒绝才熔断，超时/网络抖动只放掉探测。
+      if (isUpstreamRejection(message)) reportReject(BREAKERS.official, message);
+      else releaseProbe(BREAKERS.official);
+      return { tiers: [], expire: 0, error: message };
     }
   },
   // 节点/模型失效时清掉这一集的取址缓存，下一次 stream() 会重新走上游取址（A3 首块校验失败时调用）。
@@ -446,13 +470,20 @@ export const provider = {
         lastInvalidationAt: METRICS.lastInvalidationAt,
         cacheClears: METRICS.cacheClears,
         lastCacheClearAt: METRICS.lastCacheClearAt,
+        cooldownHits: METRICS.cooldownHits,
+        officialSkipped: METRICS.officialSkipped,
       },
       official: official.stats,
+      breakers: {
+        official: breakerSummary(BREAKERS.official),
+        compat: breakerSummary(BREAKERS.compat),
+      },
+      // 兼容旧字段（0.9 之前的 /api/metrics 消费者读 breaker.*），等价于 compat 通道。
       breaker: {
-        fails: STREAM_BREAKER.fails,
-        open: STREAM_BREAKER.openUntil > Date.now(),
-        openUntil: STREAM_BREAKER.openUntil,
-        lastError: STREAM_BREAKER.lastError,
+        fails: BREAKERS.compat.fails,
+        open: breakerState(BREAKERS.compat) === "open",
+        openUntil: BREAKERS.compat.openUntil,
+        lastError: BREAKERS.compat.lastError,
       },
       // 通道级计数：web=官网明文通道（主），app=App CENC 通道（回落）
       channels: api.channelStats || null,
@@ -469,10 +500,26 @@ function isTransientNetworkError(error) {
   return TRANSIENT_NETWORK.test(text);
 }
 
-// Limit the pinned upstream's otherwise unbounded caches during long-lived home use.
-const STREAM_BREAKER_THRESHOLD = 3;
-const STREAM_BREAKER_COOLDOWN = 45000;
-const STREAM_BREAKER = { fails: 0, openUntil: 0, lastError: "" };
+// ---- 上游熔断（B2）：连续被拒后短时不再打上游（实现在 server/breaker.mjs）----
+// 两条通道分开计数：官方 App 通道被风控时，官网 360P 明文通道通常还活着，不能一起熔断。
+const BREAKERS = { official: createBreaker("official"), compat: createBreaker("compat") };
+
+// 只有「上游在明确拒绝我们」的失败才熔断：空正文、签名失效、风控、403/429。
+// DNS 抖动、TLS 断连属于网络瞬态，交给 stream() 里的单次重试，不该拉闸。
+const UPSTREAM_REJECT =
+  /空响应|video_model|video_tab|device_register|web 播放|风控|HTTP 40[13]|HTTP 429/i;
+
+function isUpstreamRejection(message) {
+  return UPSTREAM_REJECT.test(String(message || ""));
+}
+
+function cooldownError(seconds) {
+  const error = fail("UPSTREAM_COOLDOWN", `上游限流，${seconds} 秒后重试`);
+  // http 层据此回 Retry-After，前端据此显示倒计时。
+  error.retryAfter = seconds;
+  return error;
+}
+
 const METRICS = {
   attempts: 0, failures: 0, empty: 0, retries: 0, lastError: "", lastErrorAt: 0,
   officialFails: 0, lastOfficialError: "", lastOfficialErrorAt: 0,
@@ -480,6 +527,10 @@ const METRICS = {
   invalidations: 0, lastInvalidationAt: 0,
   // 手动清缓存次数（A6）：排查上游风控时最常用的运维动作。
   cacheClears: 0, lastCacheClearAt: 0,
+  // 熔断命中（B2）：被冷却挡下的请求数；持续增长说明上游在持续拒绝我们。
+  cooldownHits: 0,
+  // 官方通道因熔断被跳过的次数：这些请求直接走了 360P，没有白等模型超时。
+  officialSkipped: 0,
 };
 
 const CACHE_TTL = 300000;
