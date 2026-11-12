@@ -14,8 +14,21 @@
     switchAt: 0, switchRetried: false, switching: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
-    user: null, favs: [], follows: []
+    user: null, favs: [], follows: [],
+    // P1(#2)：列表会话内的「上一页 id 签名」，用于识别源忽略 page 参数、反复返回同一批
+    lastPageSig: '', searching: false,
+    // P2(#5)：最近一次失败的列表动作，网络恢复（online）时自动重试一次
+    failedAction: null
   };
+
+  // P3(#8)：列表请求序号。切源/切分类/搜索/推荐/猜你喜欢共用同一套 token：
+  // 发出时取号，回来时号已被后续动作顶掉 → 整包丢弃（不渲染、不改 state、不弹提示），
+  // 避免「慢请求晚到」把上一个源的剧混进当前源的列表里（30 vs 24 张卡片）。
+  var reqSeq = 0;
+  function nextReq() { return ++reqSeq; }
+  function isCurrent(n) { return n === reqSeq; }
+  // 列表类请求的超时：源侧挂住时也要让「搜索中…/加载中…」有机会收尾，不能无限转。
+  var LIST_TIMEOUT_MS = 15000;
 
   // 访问口令：服务端设了 TOKEN 时，前端可用 ?token=xxx 打开一次（会记住），之后自动带上
   var TOKEN_KEY = 'hg_token', tokenCache = null;
@@ -50,30 +63,55 @@
     var qs = new URLSearchParams(params || {}).toString();
     var url = path + (qs ? ('?' + qs) : '');
     var opts = options || {};
+    var timeoutMs = Number(opts.timeoutMs) || 0;
+    if ('timeoutMs' in opts) delete opts.timeoutMs;
     opts.headers = headers(opts.headers);
     // 切源/冷启动时上游偶发 502/504，直接让首页空白太伤体验：GET 失败自动重试一次。
     var canRetry = !opts.method || opts.method === 'GET';
+    // 断网/连不上时 fetch 抛 TypeError，浏览器原文是英文「Failed to fetch」，统一汉化后再抛。
+    function netError(e) {
+      var offline = (typeof navigator !== 'undefined' && navigator.onLine === false);
+      var err = new Error(offline ? '网络已断开，请检查网络后重试' : '网络连接失败，请稍后重试');
+      err.code = offline ? 'OFFLINE' : 'NETWORK';
+      err.offline = offline;
+      err.cause = e;
+      return err;
+    }
     function attempt(left) {
-      return fetch(url, opts).then(function (r) {
+      var o = opts, timer = null, ctl = null;
+      if (timeoutMs > 0 && typeof AbortController !== 'undefined') {
+        ctl = new AbortController();
+        o = Object.assign({}, opts, { signal: ctl.signal });
+        timer = setTimeout(function () { try { ctl.abort(); } catch (e) {} }, timeoutMs);
+      }
+      var clearTimer = function () { if (timer) { clearTimeout(timer); timer = null; } };
+      return fetch(url, o).then(function (r) {
+        clearTimer();
         return r.text().then(function (text) {
           var body = {};
           if (text) { try { body = JSON.parse(text); } catch (e) { body = { error: text.slice(0, 200) }; } }
           if (!r.ok) {
             if (left > 0 && canRetry && (r.status === 502 || r.status === 504)) return attempt(left - 1);
-            var err = new Error(body && body.error || ('HTTP ' + r.status)); err.code = body && body.code; throw err;
+            var err = new Error(body && body.error || ('HTTP ' + r.status));
+            err.code = body && body.code; err.status = r.status; throw err;
           }
           return body;
         });
       }, function (e) {
+        clearTimer();
+        if (e && e.name === 'AbortError') {
+          var te = new Error('请求超时，请稍后重试'); te.code = 'TIMEOUT'; throw te;
+        }
         if (left > 0 && canRetry) return attempt(left - 1);
-        throw e;
+        throw netError(e);
       });
     }
     return attempt(1);
   }
-  function api(path, params) { return request(path, params); }
-  function postJson(path, body) {
-    return request(path, null, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  function api(path, params, options) { return request(path, params, options); }
+  function postJson(path, body, options) {
+    var o = Object.assign({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }, options || {});
+    return request(path, null, o);
   }
   function putJson(path, body) {
     return request(path, null, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -451,6 +489,35 @@
     n.textContent = text; n.classList.remove('hidden'); syncBanners();
   }
 
+  // 空态区统一入口：文案 + 可选小字说明 + 可选「重试」按钮。
+  // 断网/请求失败/无结果都走这里，保证占位文案一定被替换掉、并且能一键回到当前动作。
+  function setEmptyState(text, opts) {
+    var el = $('empty'); if (!el) return;
+    opts = opts || {};
+    el.textContent = '';
+    var msg = document.createElement('div'); msg.className = 'emptymsg';
+    msg.textContent = text || '';
+    el.appendChild(msg);
+    if (opts.note) {
+      var note = document.createElement('div'); note.className = 'emptynote';
+      note.textContent = opts.note;
+      el.appendChild(note);
+    }
+    if (typeof opts.retry === 'function') {
+      var bar = document.createElement('div'); bar.className = 'emptyacts';
+      var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'btn ghost mini';
+      btn.textContent = opts.retryText || '重试';
+      btn.addEventListener('click', function () { el.classList.add('hidden'); opts.retry(); });
+      bar.appendChild(btn); el.appendChild(bar);
+    }
+    el.classList.remove('hidden');
+  }
+  function clearEmptyState() {
+    var el = $('empty');
+    if (!el) return;
+    el.classList.add('hidden'); el.textContent = '';
+  }
+
   // ---- 播放通道健康横幅（/api/alerts）----
   // 与 #notice 分开：聚合搜索的进度提示很频繁，混在一条里会互相覆盖。
   function renderHealthBar(s) {
@@ -490,6 +557,9 @@
 
   function makeCard(item) {
     var card = document.createElement('div'); card.className = 'card';
+    // 卡片带上是哪条数据、来自哪个源：便于排障与快速切源后的结果核对
+    card.dataset.id = item.id == null ? '' : String(item.id);
+    card.dataset.source = item.source || '';
     var img = document.createElement('img'); img.className = 'poster'; img.loading = 'lazy';
     img.alt = item.title || '';
     var original = item.cover || '';
@@ -527,16 +597,35 @@
 
   function renderItems(items, append) {
     var grid = $('grid');
-    // 新一次列表渲染（不是翻页追加）代表换了视图，自动补页计数归零
-    if (!append) autoChain = 0;
+    items = items || [];
+    // 新一次列表渲染（不是翻页追加）代表换了视图：自动补页预算与上一页签名都按新会话重置
+    if (!append) { autoBudget = 0; state.lastPageSig = pageSig(items); }
     if (!append) grid.textContent = '';
+    else {
+      // 翻页去重兜底：源忽略 page 参数时会把同一批反复返回，已经渲染过的 id 不再追加，
+      // 否则页面会出现重复卡片，看起来像「同一页被加了两次」。
+      var seen = {};
+      Array.prototype.forEach.call(grid.children, function (c) {
+        if (c && c.dataset && c.dataset.id) seen[c.dataset.id] = 1;
+      });
+      items = items.filter(function (it) {
+        var key = it && it.id != null ? String(it.id) : '';
+        if (!key) return true;
+        if (seen[key]) return false;
+        seen[key] = 1;
+        return true;
+      });
+    }
     items.forEach(function (it) { grid.appendChild(makeCard(it)); });
-    $('empty').classList.toggle('hidden', grid.children.length > 0);
-    if (!grid.children.length) $('empty').textContent = '没有内容';
+    // 有结果就必须收起空态/占位；搜索进行中不要用「没有内容」盖住「搜索中…」
+    if (grid.children.length) clearEmptyState();
+    else if (!state.searching) setEmptyState('没有内容');
     $('btnMore').classList.toggle('hidden', !state.hasMore);
     // 结果不足一屏时不会产生滚动，IntersectionObserver 也不会再次触发，
     // 这里主动补一次「是否已到底」的判定，让后续分页能继续加载。
-    if (state.hasMore && items.length) setTimeout(function () { maybeAutoMore(); }, 700);
+    // 定时器要带上视图令牌：视图已经换掉时不能再替新视图翻页（否则会把新视图的页码推错）。
+    var token = reqSeq;
+    if (state.hasMore && items.length) setTimeout(function () { if (token === reqSeq) maybeAutoMore(); }, 700);
   }
 
   function renderChips() {
@@ -584,18 +673,22 @@
 
   function loadHome() {
     setView('home'); setNav('home'); showNotice('');
+    state.searching = false;   // 离开搜索视图后「搜索中」不再有效，别让它压住后续空态
+    state.hasMore = false;     // 先关掉上一视图的分页：否则底部哨兵会在新视图请求还没回来时替它翻页
+    var seq = nextReq();
     state.aggregate = false; state.aggGroups = [];
+    state.mode = 'home'; state.tid = ''; state.q = ''; state.page = 1;
     if (state.source === '__all') {
       $('grid').textContent = ''; $('chips').textContent = ''; $('btnMore').classList.add('hidden');
-      state.classes = []; state.items = []; state.hasMore = false; state.mode = 'home';
-      $('empty').textContent = '「全部源」模式只用于聚合搜索：输入关键词回车，会同时检索所有已启用的源。';
-      $('empty').classList.remove('hidden');
+      state.classes = []; state.items = []; state.hasMore = false;
+      setEmptyState('「全部源」模式只用于聚合搜索：输入关键词回车，会同时检索所有已启用的源。');
       return;
     }
-    $('empty').textContent = '加载中…'; $('empty').classList.remove('hidden');
     $('grid').textContent = ''; $('btnMore').classList.add('hidden');
-    state.mode = 'home'; state.tid = ''; state.q = ''; state.page = 1;
-    return api('/api/home', { source: cur(), page: 1 }).then(function (r) {
+    setEmptyState('加载中…');
+    return api('/api/home', { source: cur(), page: 1 }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+      if (!isCurrent(seq)) return;              // 已切走：整包丢弃
+      state.failedAction = null;
       state.classes = r.classes || [];
       state.items = r.items || []; state.hasMore = !!r.hasMore;
       renderChips();
@@ -603,21 +696,35 @@
       if (!state.items.length && state.classes.length) {
         return loadCategory(state.classes[0].id);
       }
-      if (!state.items.length && !state.classes.length) {
-        $('empty').textContent = '这个源没有返回任何内容'; $('empty').classList.remove('hidden');
-      }
-    }).catch(function (e) { showError(e); });
+      if (!state.items.length) setEmptyState('这个源没有返回任何内容', { retry: loadHome });
+    }).catch(function (e) {
+      if (!isCurrent(seq)) return;
+      state.failedAction = loadHome;
+      showError(e);
+    });
   }
 
   function loadCategory(tid) {
-    setView('home'); setNav(''); state.aggregate = false; state.aggGroups = []; state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
+    setView('home'); setNav(''); showNotice('');
+    state.searching = false;
+    state.hasMore = false;
+    var seq = nextReq();
+    state.aggregate = false; state.aggGroups = []; state.mode = 'category'; state.tid = tid; state.page = 1; state.q = '';
     renderChips();
-    $('empty').textContent = '加载中…'; $('empty').classList.remove('hidden'); $('grid').textContent = '';
-    return api('/api/category', { source: cur(), tid: tid, page: 1 }).then(function (r) {
+    setEmptyState('加载中…'); $('grid').textContent = ''; $('btnMore').classList.add('hidden');
+    return api('/api/category', { source: cur(), tid: tid, page: 1 }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+      if (!isCurrent(seq)) return;
+      state.failedAction = null;
       state.items = r.items || []; state.hasMore = !!r.hasMore;
       renderItems(state.items, false);
-      if (!state.items.length) { $('empty').textContent = '该分类暂无内容'; $('empty').classList.remove('hidden'); }
-    }).catch(function (e) { showError(e); });
+      if (!state.items.length) {
+        setEmptyState('该分类暂无内容', { note: searchNote(r), retry: function () { loadCategory(tid); } });
+      }
+    }).catch(function (e) {
+      if (!isCurrent(seq)) return;
+      state.failedAction = function () { loadCategory(tid); };
+      showError(e);
+    });
   }
 
   function loadMore() {
@@ -628,41 +735,68 @@
       setAutoMore(true);
       return aggFetchPage(true);
     }
+    // 翻页不推进「视图令牌」：令牌属于当前视图（首页/分类/搜索…），只有切视图才换号。
+    // 旧实现翻页也取号，会把所属视图的 seq 顶掉，导致该视图的收尾逻辑（如清「搜索中…」）被误判过期。
+    var viewSeq = reqSeq;
     state.page += 1;
     var p = state.page;
     var req;
-    if (state.mode === 'recommend') req = api('/api/recommend', { page: p });
-    else if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p });
-    else if (state.mode === 'category') req = api('/api/category', { source: cur(), tid: state.tid, page: p });
-    else req = api('/api/home', { source: cur(), page: p });
+    if (state.mode === 'recommend') req = api('/api/recommend', { page: p }, { timeoutMs: LIST_TIMEOUT_MS });
+    else if (state.mode === 'search') req = api('/api/search', { source: cur(), q: state.q, page: p }, { timeoutMs: LIST_TIMEOUT_MS });
+    else if (state.mode === 'category') req = api('/api/category', { source: cur(), tid: state.tid, page: p }, { timeoutMs: LIST_TIMEOUT_MS });
+    else req = api('/api/home', { source: cur(), page: p }, { timeoutMs: LIST_TIMEOUT_MS });
     $('btnMore').classList.add('hidden');
     setAutoMore(true);
     var done = function () { state.loadingMore = false; setAutoMore(false); };
     return req.then(function (r) {
+      if (viewSeq !== reqSeq) { done(); return; }   // 翻页途中切走了：丢弃，别把旧源混进来
       var incoming = r.items || [];
-      // 有的源会返回空列表却仍报 hasMore=true，这里强制收尾，避免无限加载。
-      state.hasMore = incoming.length ? !!r.hasMore : false;
+      // P1(#2) 去重兜底：源忽略 page 参数时会反复返回同一批（hasMore 恒真），
+      // 连续两页 id 集合完全相同即判定到底，避免无限请求。
+      var sig = pageSig(incoming);
+      var samePage = !!sig && sig === state.lastPageSig;
+      if (incoming.length) state.lastPageSig = sig;
+      // 空列表仍报 hasMore=true 的源也要强制收尾。
+      state.hasMore = (incoming.length && !!r.hasMore && !samePage) ? true : false;
+      if (samePage) {
+        state.hasMore = false;
+        $('btnMore').classList.add('hidden');
+      }
       renderItems(incoming, true);
-      if (state.mode === 'search' && r.fallback) showNotice(searchNote(r));
+      if (state.mode === 'search' && (r.fallback || r.note)) showNotice(searchNote(r));
       done();
-    }).catch(function (e) { state.page -= 1; done(); showError(e); });
+    }).catch(function (e) {
+      if (viewSeq === reqSeq) state.page -= 1;
+      done();
+      if (viewSeq === reqSeq) { state.failedAction = loadMore; showError(e); }
+    });
   }
 
   // ---- 推荐页（红果各榜单按真实评分合并排序） ----
   function loadRecommend() {
     setView('home'); setNav('recommend'); showNotice('');
+    state.searching = false;
+    state.hasMore = false;
+    var seq = nextReq();
     state.aggregate = false; state.aggGroups = [];
     state.mode = 'recommend'; state.tid = ''; state.q = ''; state.page = 1; state.classes = [];
     $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
-    $('empty').textContent = '加载推荐中…'; $('empty').classList.remove('hidden');
+    setEmptyState('加载推荐中…');
     setAutoMore(true);
     state.loadingMore = true;
-    return api('/api/recommend', { page: 1 }).then(function (r) {
+    return api('/api/recommend', { page: 1 }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+      if (!isCurrent(seq)) { state.loadingMore = false; setAutoMore(false); return; }
+      state.failedAction = null;
       state.items = r.items || []; state.hasMore = !!r.hasMore;
       state.loadingMore = false; setAutoMore(false);
       renderItems(state.items, false);
-      if (!state.items.length) { $('empty').textContent = '推荐暂不可用'; $('empty').classList.remove('hidden'); }
-    }).catch(function (e) { state.loadingMore = false; setAutoMore(false); showError(e); });
+      if (!state.items.length) setEmptyState('推荐暂不可用', { retry: loadRecommend });
+    }).catch(function (e) {
+      state.loadingMore = false; setAutoMore(false);
+      if (!isCurrent(seq)) return;
+      state.failedAction = loadRecommend;
+      showError(e);
+    });
   }
 
   // ---- 猜你喜欢（基于观看历史：协同过滤 + 相似内容 + 热门兜底） ----
@@ -676,23 +810,38 @@
   }
   function loadForYou(refresh) {
     setView('home'); setNav('foryou'); showNotice('');
+    state.searching = false;
+    state.hasMore = false;
+    var seq = nextReq();
+    var act = function () { loadForYou(refresh); };
     state.aggregate = false; state.aggGroups = [];
     state.mode = 'foryou'; state.tid = ''; state.q = ''; state.page = 1; state.classes = [];
     state.hasMore = false;
     $('chips').textContent = ''; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
-    $('empty').textContent = '正在为你挑选…'; $('empty').classList.remove('hidden');
+    setEmptyState('正在为你挑选…');
     setAutoMore(false); state.loadingMore = true;
     // 未登录时把本地观看历史作为种子；登录后服务端以账号历史为准（跨设备同一份结果）。
     var seeds = histLoad().slice(0, 8).map(function (e) {
       return { source: e.source, id: e.id, title: e.title, cover: e.cover };
     });
-    return postJson('/api/for-you', { seeds: seeds, refresh: refresh === true }).then(function (r) {
-      state.loadingMore = false;
-      state.items = r.items || [];
+    // P3(#7)：无论 0 结果 / 失败 / 超时，占位「正在为你挑选…」都必须被真实空态替换掉。
+    var done = function () { state.loadingMore = false; setAutoMore(false); };
+    return postJson('/api/for-you', { seeds: seeds, refresh: refresh === true }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+      done();
+      if (!isCurrent(seq)) return;
+      state.failedAction = null;
+      state.items = (r && r.items) || [];
       renderItems(state.items, false);
       showNotice(forYouNote(r));
-      if (!state.items.length) { $('empty').textContent = '暂时没有可推荐的剧，先去首页看看吧'; $('empty').classList.remove('hidden'); }
-    }).catch(function (e) { state.loadingMore = false; showError(e); });
+      if (!state.items.length) {
+        setEmptyState('还没有足够数据，先看热门', { note: '多看几部之后这里会变成专属推荐。', retry: act, retryText: '再试一次' });
+      }
+    }).catch(function (e) {
+      done();
+      if (!isCurrent(seq)) return;
+      state.failedAction = act;
+      showError(e);
+    });
   }
 
   function setNav(id) {
@@ -710,7 +859,27 @@
   var AUTO_MODES = { home: 1, category: 1, search: 1, recommend: 1 };
   var autoLockAt = 0;
   // 结果不足一屏时会连续自动补页；给个上限，避免源忽略 page 参数时无限自增。
-  var autoChain = 0;
+  // P1(#2)：预算按「本次列表会话」计，滚动事件不再重置它（旧实现一滚动就归零 → 上限形同虚设）；
+  // 只有用户显式点「加载更多」才会再续一次预算。
+  var AUTO_BUDGET_MAX = 5;
+  var autoBudget = 0;
+
+  // 一页结果的 id 集合签名：连续两页完全相同 → 源忽略了 page 参数，直接判定到底。
+  function pageSig(items) {
+    return (items || []).map(function (it) {
+      return (it && it.source ? it.source : '') + '|' + (it && it.id != null ? it.id : '');
+    }).sort().join('\u0001');
+  }
+
+  // 空态「重试」按钮 / 断网恢复都走这里：重跑当前视图对应的动作。
+  function retryCurrent() {
+    if (state.mode === 'search' && state.q) { $('q').value = state.q; return doSearch(); }
+    if (state.mode === 'category' && state.tid) return loadCategory(state.tid);
+    if (state.mode === 'recommend') return loadRecommend();
+    if (state.mode === 'foryou') return loadForYou();
+    return loadHome();
+  }
+
   function maybeAutoMore() {
     if (!AUTO_MODES[state.mode] || !state.hasMore || state.loadingMore) return;
     if (!$('detail').classList.contains('hidden')) return;
@@ -719,17 +888,21 @@
     var fits = doc.scrollHeight <= window.innerHeight + 200;
     if (!fits && window.innerHeight + window.scrollY < doc.scrollHeight - 600) return;
     if (Date.now() - autoLockAt < 600) return;
-    if (autoChain >= 5) return;
+    if (autoBudget >= AUTO_BUDGET_MAX) return;
     autoLockAt = Date.now();
-    autoChain += 1;
+    autoBudget += 1;
     loadMore();
   }
 
   function searchNote(r) {
-    if (!r || !r.fallback) return '';
-    // 只有在官网 JSON 搜索真的不可用时才会走到推荐池兜底，把原因带上便于排查
-    return '提示：红果官网搜索暂时不可用' + (r.error ? '（' + r.error + '）' : '') +
-      '，这里是在首页推荐池（' + (r.poolSize || 0) + ' 部）中检索的结果，可能不全。切换到 JS 源可获得完整搜索。';
+    if (!r) return '';
+    // 服务端新契约：note / fallbackReason 直接给的是人话，优先透传。
+    if (r.note) return r.note;
+    if (r.fallbackReason) return '提示：' + r.fallbackReason;
+    if (!r.fallback) return '';
+    // 旧行为：官网 JSON 搜索不可用时走推荐池兜底
+    return '该源未按关键词检索，以下为源返回的热门内容' + (r.poolSize ? '（推荐池 ' + r.poolSize + ' 部）' : '') +
+      (r.error ? '；原因：' + r.error : '') + '。切换到 JS 源可获得完整搜索。';
   }
 
   // ---- 多源聚合搜索：并发请求各源，谁先返回先展示，慢源不阻塞整体 ----
@@ -760,13 +933,14 @@
     if (!append) {
       // 每个源维护自己的页码：慢源/失败源不会因为别家翻页而跳页。
       state.aggGroups = list.map(function (s) {
-        return { id: s.id, name: s.name || s.id, page: 0, hasMore: true, count: 0, error: '', loading: true, items: [] };
+        return { id: s.id, name: s.name || s.id, page: 0, hasMore: true, count: 0, error: '', loading: true, items: [], sig: '', fallback: false, note: '' };
       });
       state.hasMore = false;
     }
     if (!list.length) {
       state.aggregate = false;
-      $('empty').textContent = '没有可用于聚合搜索的源'; $('empty').classList.remove('hidden');
+      state.searching = false;
+      setEmptyState('没有可用于聚合搜索的源', { retry: retryCurrent });
       return Promise.resolve();
     }
     return aggFetchPage(!!append);
@@ -774,44 +948,59 @@
 
   // 聚合搜索翻页：按每个源自己的 page+1 请求，互不牵连。
   function aggFetchPage(append) {
+    // 聚合翻页同样不换视图令牌：它是当前搜索视图的一部分。
+    var viewSeq = reqSeq;
     var groups = state.aggGroups || [];
     var attempted = 0;
     var failed = 0;
-    groups.forEach(function (g) { if (!append || g.hasMore) { g.loading = true; if (!append) g.error = ''; } });
+    groups.forEach(function (g) { if (!append || g.hasMore) { g.loading = true; if (!append) { g.error = ''; g.note = ''; } } });
     showNotice(aggNote());
     var jobs = groups.map(function (g) {
       if (append && !g.hasMore) { g.loading = false; return Promise.resolve(); }
       var next = (g.page || 0) + 1;
       attempted += 1;
-      return api('/api/search', { source: g.id, q: state.q, page: next }).then(function (r) {
+      return api('/api/search', { source: g.id, q: state.q, page: next }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+        if (viewSeq !== reqSeq) return;
         var incoming = (r.items || []).map(function (it) {
           return Object.assign({}, it, { source: g.id, sourceName: g.name });
         });
+        // 与单源一致：连续两页 id 集合完全相同 → 该源忽略 page，判定到底。
+        var sig = pageSig(incoming);
+        var samePage = !!sig && sig === g.sig;
+        if (incoming.length) g.sig = sig;
         g.loading = false; g.error = ''; g.page = next;
         // 空列表却仍报 hasMore 的源强制收尾，避免无限翻页。
-        g.hasMore = incoming.length ? !!r.hasMore : false;
+        g.hasMore = (incoming.length && !!r.hasMore && !samePage);
         g.fallback = !!r.fallback;
+        if (searchNote(r)) g.note = g.name + '：' + searchNote(r);
         g.count += incoming.length;
         g.items = (g.items || []).concat(incoming);
-        if (incoming.length) {
-          renderItems(incoming, true);
-          $('empty').classList.add('hidden');
-        }
+        if (incoming.length) renderItems(incoming, true);
       }).catch(function (e) {
+        if (viewSeq !== reqSeq) return;
         g.loading = false;
         failed += 1;
         // 失败不推进 g.page，下次滚动仍从同一页重试。
         if (!append) { g.error = e && e.message ? e.message : '请求失败'; }
       }).then(function () {
-        showNotice(aggNote());
+        if (viewSeq === reqSeq) showNotice(aggNote());
       });
     });
     return Promise.all(jobs).then(function () {
+      if (viewSeq !== reqSeq) return { attempted: attempted, failed: failed };
+      state.searching = false;
       state.page = groups.reduce(function (n, g) { return Math.max(n, g.page || 0); }, 0);
       state.hasMore = groups.some(function (g) { return g.hasMore; });
       $('btnMore').classList.toggle('hidden', !state.hasMore);
+      // 任何源返回了 fallback/note（未按关键词检索）都要如实告诉用户，而不是伪装成搜索结果。
+      var notes = groups.filter(function (g) { return g.note; }).map(function (g) { return g.note; });
       if (!$('grid').children.length) {
-        $('empty').textContent = '没有找到「' + state.q + '」'; $('empty').classList.remove('hidden');
+        setEmptyState('没有找到「' + state.q + '」，试试别的词或换源', {
+          note: notes.length ? notes.slice(0, 3).join('；') : '',
+          retry: retryCurrent
+        });
+      } else if (notes.length) {
+        showNotice('部分源未按关键词检索 —— ' + notes.slice(0, 3).join('；'));
       }
       state.loadingMore = false;
       setAutoMore(false);
@@ -822,17 +1011,42 @@
   function doSearch() {
     var q = $('q').value.trim();
     if (!q) { loadHome(); return; }
-    setView('home'); setNav(''); state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
+    var seq = nextReq();
+    setView('home'); setNav(''); showNotice('');
+    state.mode = 'search'; state.q = q; state.page = 1; state.tid = '';
+    state.searching = true;
+    // 同样先关分页：清空列表会让底部哨兵立刻进入视口，若沿用上一视图的 hasMore，
+    // 它会抢先替这次搜索翻第 2 页（旧 bug：搜索还没回来就先发了 page=2）。
+    state.hasMore = false;
     $('chips').textContent = ''; state.items = []; $('grid').textContent = ''; $('btnMore').classList.add('hidden');
-    $('empty').textContent = '搜索中…'; $('empty').classList.remove('hidden'); showNotice('');
+    setEmptyState('搜索中…');
     if (cur() === '__all') { startAggSearch(q, false); return; }
     state.aggregate = false; state.aggGroups = [];
-    api('/api/search', { source: cur(), q: q, page: 1 }).then(function (r) {
+    // P1(#3)：搜索结束（成功/失败/超时）必须清掉「搜索中…」占位，并给出明确状态。
+    api('/api/search', { source: cur(), q: q, page: 1 }, { timeoutMs: LIST_TIMEOUT_MS }).then(function (r) {
+      if (!isCurrent(seq)) return;
+      state.failedAction = null;
       state.hasMore = !!r.hasMore;
-      renderItems(r.items || [], false);
-      showNotice(searchNote(r));
-      if (!(r.items || []).length) { $('empty').textContent = '没有找到「' + q + '」'; $('empty').classList.remove('hidden'); }
-    }).catch(function (e) { showError(e); });
+      state.items = r.items || [];
+      renderItems(state.items, false);
+      var note = searchNote(r);
+      showNotice(note);
+      if (!state.items.length) {
+        setEmptyState('没有找到「' + q + '」，试试别的词或换源', { note: note, retry: retryCurrent });
+      }
+    }).catch(function (e) {
+      if (!isCurrent(seq)) return;
+      state.failedAction = retryCurrent;
+      showError(e);
+    }).then(function () {
+      // finally：无论上面走哪个分支，都保证占位被替换掉（禁止「搜索中…」常驻）
+      if (!isCurrent(seq)) return;
+      state.searching = false;
+      var el = $('empty');
+      if (el && !el.classList.contains('hidden') && el.textContent.indexOf('搜索中') !== -1) {
+        setEmptyState('没有找到「' + q + '」，试试别的词或换源', { retry: retryCurrent });
+      }
+    });
   }
 
   function openDetail(id, src) {
@@ -1013,6 +1227,58 @@
   function hasHevcOption() {
     return (state.qualityOptions || []).some(function (o) { return o.codec === 'hevc'; });
   }
+  // P2(#4)：启动时就把 HEVC 能力探测好（state.hevcCap），清晰度菜单构建时直接可用，
+  // 不必等到第一次起播才知道本机能不能解 HEVC。
+  function probeHevcCap(force) {
+    if (!force && state.hevcCap != null) return state.hevcCap;
+    var ok = false;
+    var forced = null;
+    try { forced = localStorage.getItem(HEVC_KEY); } catch (e) { /* 隐私模式 */ }
+    if (forced === '1') ok = true;
+    else if (forced === '0') ok = false;   // 显式覆盖优先，不再被下面的 canPlayType 兜底翻回 true
+    else {
+      try {
+        if (window.MediaSource && window.MediaSource.isTypeSupported) {
+          ok = window.MediaSource.isTypeSupported(HEVC_CODECS[0]);
+        }
+      } catch (e) { ok = false; }
+      if (!ok) {
+        // isTypeSupported 说不行时再用 canPlayType 兜一次（部分平台只实现了后者）
+        try {
+          var probe = document.createElement('video');
+          ok = !!(probe.canPlayType && HEVC_CODECS.some(function (c) { return probe.canPlayType(c) === 'probably'; }));
+        } catch (e) { ok = false; }
+      }
+    }
+    state.hevcCap = ok;
+    return ok;
+  }
+
+  // 档位可播性判定：codec 为 vvc/hevc 时可能本机解不了，但服务端 transcode:true 表示
+  // 该档位会被转码成 H.264（浏览器能播），此时仍可点。
+  // 返回 { dead, badge, title }：dead=true 表示置灰不可点。
+  function qualityGate(o) {
+    if (!o) return { dead: false, badge: '', title: '' };
+    var codec = String(o.codec || '').toLowerCase();
+    var transcoded = o.transcode === true;
+    if (codec === 'vvc') {
+      if (transcoded) return { dead: false, badge: '服务端转码', title: '原片为 H.266(VVC)，由服务端转码为 H.264 播放' };
+      return { dead: true, badge: 'H.266 浏览器不支持', title: 'H.266(VVC) 编码浏览器无法解码，且服务端未提供转码' };
+    }
+    if (codec === 'hevc') {
+      if (transcoded) return { dead: false, badge: '服务端转码', title: '该档位由服务端转码为 H.264 后播放' };
+      if (!hevcSupported()) return { dead: true, badge: 'HEVC·本机不支持', title: '本机浏览器不支持 HEVC(hvc1) 解码，该档位无法播放' };
+      return { dead: false, badge: '', title: '' };
+    }
+    return { dead: false, badge: '', title: '' };
+  }
+  // 默认起播档位：第一个可播的档位（HEVC/VVC 不可解时自动降到可播档），「自动」优先。
+  function defaultPlayableOption() {
+    var opts = (state.qualityOptions || []).filter(function (o) { return o.url && !qualityGate(o).dead; });
+    if (!opts.length) return null;
+    var auto = opts.filter(function (o) { return o.key === 'auto'; })[0];
+    return auto || opts[0];
+  }
   // 切换到指定档位：native 直链靠换 src，HLS 靠 hls.js 的 level。
   function switchNativeQuality(o) {
     var v = $('video'); if (!v || !o || !o.url) return false;
@@ -1081,23 +1347,45 @@
     var menu = $('qualityMenu'); if (!menu) return;
     menu.textContent = '';
     var opts = state.qualityOptions || [];
+    var activeDead = null;
     if (opts.length <= 1) {
+      var only = opts[0] || null;
+      var g0 = qualityGate(only);
       var single = document.createElement('div');
       single.className = 'qitem disabled';
-      single.textContent = (currentResolutionLabel() || '原画') + '（该源仅此一种清晰度）';
+      single.textContent = (currentResolutionLabel() || (only && only.label) || '原画') +
+        (g0.dead ? '（该源仅此一种清晰度，本机无法解码）' : '（该源仅此一种清晰度）');
+      if (g0.title) single.title = g0.title;
       menu.appendChild(single);
+      if (g0.dead) activeDead = { label: single.textContent, gate: g0 };
     } else {
       opts.forEach(function (o) {
-        var d = document.createElement('div');
+        var gate = qualityGate(o);
         var active = state.playKind === 'native'
           ? (o.key != null && o.key === state.qualityKey)
           : ((o.levelIndex != null && o.levelIndex === state.quality) || (o.levelIndex === -1 && state.quality < 0));
-        var dead = o.codec === 'vvc';
-        d.className = 'qitem' + (active ? ' active' : '') + (dead ? ' disabled' : '');
-        d.textContent = o.label + (dead ? '（H.266 不支持）' : '');
-        if (!dead) d.addEventListener('click', function () { selectQuality(o); });
+        var d = document.createElement('div');
+        d.className = 'qitem' + (active ? ' active' : '') + (gate.dead ? ' disabled' : '');
+        var lab = document.createElement('span'); lab.className = 'qlabel'; lab.textContent = o.label;
+        d.appendChild(lab);
+        // 小字标注：HEVC·本机不支持 / H.266 浏览器不支持 / 服务端转码
+        if (gate.badge) {
+          var bd = document.createElement('span');
+          bd.className = 'qbadge' + (gate.dead ? ' dead' : ' ok');
+          bd.textContent = gate.badge;
+          d.appendChild(bd);
+        }
+        if (gate.title) d.title = gate.title;
+        if (!gate.dead) d.addEventListener('click', function () { selectQuality(o); });
         menu.appendChild(d);
+        if (active && gate.dead) activeDead = { label: o.label, gate: gate };
       });
+    }
+    if (activeDead) {
+      // 当前档位被置灰时的兜底说明：告诉用户为什么不能播、以及该怎么办
+      var fb = document.createElement('div'); fb.className = 'qnote dead';
+      fb.textContent = '当前「' + activeDead.label + '」本机无法解码（' + activeDead.gate.badge + '），请切换到可播放的档位。';
+      menu.appendChild(fb);
     }
     if (state.qualityNote) {
       var note = document.createElement('div'); note.className = 'qnote'; note.textContent = state.qualityNote;
@@ -1136,16 +1424,13 @@
   function selectQuality(o) {
     closeQualityMenu();
     // native 直链（红果官方多档）：换 src 重载，保留播放进度。
+    if (o) {
+      // 置灰档位即使被脚本调用也不允许起播（菜单点击已拦截，这里兜底）
+      var gate = qualityGate(o);
+      if (gate.dead) { toast(gate.title || (o.label + ' 本机无法解码')); return; }
+    }
     if (state.playKind === 'native' && o && o.url) {
       if (o.key === state.qualityKey) { toast('已是 ' + o.label); return; }
-      if (o.codec === 'vvc') {
-        toast('该档位是 H.266(VVC) 编码，浏览器无法解码');
-        return;
-      }
-      if (o.codec === 'hevc' && !hevcSupported()) {
-        toast('当前浏览器不支持 HEVC 编码，该档位无法播放');
-        return;
-      }
       if (switchNativeQuality(o)) toast('清晰度：' + o.label);
       return;
     }
@@ -1162,7 +1447,9 @@
   // 兼容旧调试钩子：无多档时提示，有 HLS 多档时在档位间循环。
   function cycleQuality() {
     if (state.playKind === 'native' && (state.qualityOptions || []).length > 1) {
-      var nat = state.qualityOptions.filter(function (o) { return o.codec !== 'vvc'; });
+      // 只在「本机可播」的档位之间循环（vvc / 不可解 hevc 已被置灰）
+      var nat = state.qualityOptions.filter(function (o) { return !qualityGate(o).dead; });
+      if (!nat.length) { toast('没有本机可播放的清晰度档位'); return; }
       var cur = -1;
       for (var i = 0; i < nat.length; i++) if (nat[i].key === state.qualityKey) cur = i;
       selectQuality(nat[(cur + 1) % nat.length]);
@@ -1316,24 +1603,33 @@
     state.switching = false;
     if (qualityInfo && Array.isArray(qualityInfo.options) && qualityInfo.options.length) {
       state.qualityOptions = qualityInfo.options.map(function (o) {
-        return { key: o.key, label: o.label, height: o.height, codec: o.codec || '', url: o.url || '', levelIndex: null };
+        return {
+          key: o.key, label: o.label, height: o.height,
+          codec: String(o.codec || '').toLowerCase(), url: o.url || '',
+          // transcode=true：服务端会转码成 H.264，浏览器能播 → 不置灰
+          transcode: o.transcode === true, levelIndex: null
+        };
       });
       state.qualityNote = qualityInfo.note || '';
       // 地址栏里的 ?q= 是用户上次选的档位（切档时写入），刷新/分享回来仍按它起播。
       var wantQ = urlQualityParam();
       var wantOpt = wantQ ? optionByKey(wantQ) : null;
-      if (wantOpt && wantOpt.url && wantOpt.codec !== 'vvc' && !(wantOpt.codec === 'hevc' && !hevcSupported())) {
+      if (wantOpt && wantOpt.url && !qualityGate(wantOpt).dead) {
         url = wantOpt.url;
         state.qualityKey = wantOpt.key;
         state.hevcFallback = wantOpt.key === 'compat';
-      } else if (state.playKind === 'native' && hasHevcOption() && !hevcSupported()) {
-        // 浏览器不支持 HEVC 时最高档必然解不出来，直接起播 360P 兼容线路，省掉一次失败重试。
-        var compat = optionByKey('compat');
-        if (compat && compat.url) {
-          url = compat.url;
-          state.qualityKey = 'compat';
-          state.hevcFallback = true;
-          if (!state.hevcWarned) { state.hevcWarned = true; toast('当前浏览器不支持 HEVC 高清编码，已使用 360P 兼容线路'); }
+      } else if (state.playKind === 'native') {
+        // 最高档本机解不出来（HEVC/VVC 且未转码）时，直接起播第一个可播档，省掉一次必然失败的起播。
+        var top = state.qualityOptions[0];
+        var playable = defaultPlayableOption();
+        if (top && playable && playable.url && qualityGate(top).dead) {
+          url = playable.url;
+          state.qualityKey = playable.key;
+          state.hevcFallback = playable.key === 'compat';
+          if (!state.hevcWarned) {
+            state.hevcWarned = true;
+            toast('「' + top.label + '」' + qualityGate(top).badge + '，已改用「' + playable.label + '」线路');
+          }
         }
       }
     }
@@ -1759,8 +2055,17 @@
 
   function showError(e) {
     var msg = (e && e.message) || '出错了';
+    // P2(#5) 兜底：任何路径都不把浏览器英文原文（Failed to fetch / NetworkError…）甩给用户
+    if (/Failed to fetch|NetworkError|Load failed|ERR_INTERNET_DISCONNECTED|ERR_NETWORK|net::/i.test(msg)) {
+      msg = (typeof navigator !== 'undefined' && navigator.onLine === false)
+        ? '网络已断开，请检查网络后重试' : '网络连接失败，请稍后重试';
+    }
     toast(msg);
-    $('empty').textContent = msg; $('empty').classList.remove('hidden');
+    // 空态区带「重试」按钮：重跑当前视图对应的动作（首页/分类/搜索/推荐/猜你喜欢）
+    setEmptyState(msg, {
+      note: (e && e.code === 'OFFLINE') ? '恢复网络后会自动重试一次，也可以直接点重试。' : '',
+      retry: state.failedAction || retryCurrent
+    });
   }
 
   // ---- 导入源 ----
@@ -2037,12 +2342,25 @@
   // ---- 事件绑定 ----
   $('btnSearch').addEventListener('click', doSearch);
   $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch(); });
-  $('btnMore').addEventListener('click', loadMore);
+  $('btnMore').addEventListener('click', function () {
+    // 用户显式点「加载更多」：续一次自动补页预算（滚动不会续，见 maybeAutoMore）
+    autoBudget = Math.max(0, autoBudget - 1);
+    loadMore();
+  });
   $('btnHome').addEventListener('click', function () { loadHome(); });
   $('btnRecommend').addEventListener('click', function () { loadRecommend(); });
   $('btnForYou').addEventListener('click', function () { loadForYou(); });
-  // 用户真的滚动时重置自动补页计数，保证长列表能一直往下翻
-  window.addEventListener('scroll', function () { autoChain = 0; maybeAutoMore(); }, { passive: true });
+  // P1(#2)：滚动只触发「是否该补页」的判断，不再重置自动补页预算
+  // （旧实现 autoChain = 0 让 5 页上限失效，源 hasMore 恒真时能一直翻下去）。
+  window.addEventListener('scroll', function () { maybeAutoMore(); }, { passive: true });
+  // P2(#5)：网络恢复时自动重试一次最近失败的动作，用户不用手动点。
+  window.addEventListener('online', function () {
+    var act = state.failedAction;
+    if (!act) return;
+    state.failedAction = null;
+    toast('网络已恢复，正在重试…');
+    try { act(); } catch (e) {}
+  });
   // 底部哨兵：若滚动事件在容器/内嵌场景不触发，IntersectionObserver 仍能兜住自动加载
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(function (entries) {
@@ -2164,6 +2482,17 @@
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
     mergeServerHistory: mergeServerHistory, closeMenus: closeMenus,
     selectQuality: selectQuality, switchNativeQuality: switchNativeQuality,
+    qualityGate: qualityGate, probeHevcCap: probeHevcCap, buildQualityMenu: buildQualityMenu,
+    defaultPlayableOption: defaultPlayableOption, hevcSupported: hevcSupported,
+    doSearch: doSearch, loadHome: loadHome, loadCategory: loadCategory, retryCurrent: retryCurrent,
+    // 翻页/请求序号的内部计数（只读）：验证「自动补页预算与滚动解耦」时用来取证
+    debugList: function () {
+      return {
+        mode: state.mode, page: state.page, hasMore: state.hasMore, loadingMore: state.loadingMore,
+        autoBudget: autoBudget, autoLockAt: autoLockAt, reqSeq: reqSeq, lastPageSig: state.lastPageSig,
+        searching: state.searching, hevcCap: state.hevcCap, hevcSupported: hevcSupported()
+      };
+    },
     diagnose: { probe: probeStream, classify: classifyPlayback, report: diagnoseAndReport, arm: armStallCheck, clear: clearDiag },
     prefetch: { cache: prefetchCache, el: function () { return prefetchEl; }, next: prefetchNext, trim: trimPrefetch }
   };
@@ -2196,6 +2525,8 @@
   }
 
   bindPlayerEvents();
+  // P2(#4)：启动即探测 HEVC 解码能力，清晰度菜单才能给出「HEVC·本机不支持」标注
+  probeHevcCap();
   loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion(); loadHealth();
   setInterval(loadHealth, 60 * 1000);
   // PWA：注册 service worker（仅 http(s) 下有效）
