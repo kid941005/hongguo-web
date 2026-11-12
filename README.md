@@ -268,7 +268,7 @@ var spider = {
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 健康检查（含 `accounts` 是否启用账号系统） |
-| GET | `/api/metrics` | 运行指标：uptime、RSS、红果取流尝试/失败/空响应次数、熔断状态、官网/App 两条通道成功失败计数（`channels`）与监控快照（`playback`） |
+| GET | `/api/metrics` | 运行指标：uptime、RSS、红果取流尝试/失败/空响应次数、熔断状态（`breakers`）、同集并发取址去重（`dedupe`）、官网/App 两条通道成功失败计数（`channels`）与监控快照（`playback`） |
 | GET | `/api/alerts` | 播放通道监控快照：`status`（`ok`/`degraded`/`down`/`unknown`）、通道、失败次数、最近告警（最多 50 条） |
 | POST | `/api/alerts/check` | 立即跑一次通道探针（同步返回最新快照） |
 | POST | `/api/cache/clear` | 一键清缓存（排查上游风控/签名变化的第一步）：清首页 SWR、推荐池、vendor 四层缓存与官方播放模型缓存，返回各层清掉的条目数 |
@@ -315,7 +315,7 @@ var spider = {
 
 - **内置红果搜索**：主通道是官网搜索页自己用的 JSON 接口 `GET /api/search/result?query=`（只校验 UA，不依赖 App 签名，也不依赖已 CSR 化的搜索页 SSR），响应里带 `channel: "web"`、`total`、`hasMore`。该通道失败时才降级为首页推荐池检索（`fallback: true`、`channel: "pool"`，结果不全）。
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
-- **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。
+- **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。同一集同一档位被多人同时点开时只取址一次（并发请求共享同一条上游流），`/api/metrics` 的 `dedupe.shared` 可看到合并次数。
 - **红果内置流提供 1080P（HEVC）与 360P（H.264）两档**：服务端用 Android App 签名（x-argus + x-ladon）直连 `multi_video_model/v1` 取官方多档，拿到 CENC 加密流后在服务端解密、按 Range 转发（`/api/stream/<分集id>?q=1080p`）。播放器先探测浏览器 HEVC 解码能力：支持（Safari、装了 HEVC 扩展的 Edge/Chrome、部分安卓）用 1080P，不支持（Chrome/Windows 默认无 HEVC 扩展）自动落到 360P H.264 兼容线路，菜单里也可手动选。注意官方 360P–720P 档位是 **H.266/VVC** 编码，目前没有任何浏览器能解码，服务端直接不列入菜单；确实要给能解 VVC 的播放器直取时，用 `?q=720p&vvc=1`（不带 `vvc=1` 会得到 415，而不是一段黑屏流）。官方签名接口若再次变动，服务端自动回落官网明文 360P，不影响播放；若连档位信息都取不到，`/api/play` 只降级为「仅 360P 兼容线路」而不是整条播放失败。
 - **红果取址协议会变动**：内置源先走官网网页播放通道，失败再回落 App 侧 `video_tab` 链路。连续 3 次被上游拒绝（空响应 / 风控 / 403 / 429 等）即熔断 30 秒：冷却期内请求直接快速失败（`503 UPSTREAM_COOLDOWN`，不再白等十几秒上游超时），到期只放行一个探测请求，探测再失败冷却翻倍（上限 5 分钟），探测成功立即恢复。官方通道与兼容通道各自独立熔断，指标见 `/api/metrics` 的 `breakers`。
 - **降级换源依赖别家也有同名剧**：替代源是在其它源的搜索结果里按标题相似度找的，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。

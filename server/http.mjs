@@ -133,6 +133,7 @@ export function createServer({ provider, sources, catalog, users = null, monitor
         uptime: Math.round(process.uptime()),
         rss: process.memoryUsage().rss,
         ...(typeof provider.metrics === "function" ? provider.metrics() : {}),
+        ...(typeof serveStream.dedupe === "function" ? { dedupe: serveStream.dedupe() } : {}),
         playback: monitor ? monitor.snapshot() : null,
       })],
 

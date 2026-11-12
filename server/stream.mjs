@@ -2,6 +2,8 @@ import { fail } from "./errors.mjs";
 import { probeMp4Head } from "./mp4.mjs";
 
 const CHUNK = 1024 * 1024;
+// 同一集同一档位的取址去重计数（只统计，供 /api/metrics 观察效果）。
+const DEDUPE = { lookups: 0, shared: 0 };
 // 允许的清晰度参数：auto=最高可用档，compat=官网 360P 明文兜底，其余按档位名精确匹配。
 const QUALITIES = new Set(["auto", "1080p", "720p", "540p", "480p", "360p", "compat"]);
 
@@ -29,14 +31,32 @@ export function byteRange(value, total) {
 // 内置红果分集流：服务端分块解密后按 Range 吐出，浏览器只连本站。
 export function createStreamHandler({ provider, limit = 6 }) {
   let active = 0;
+  // 取址结果（含首块解密所需的 key/prepared）按 epId+档位复用：一集被多人同时点开时，
+  // 只有第一个请求去打上游取址，其余共享同一个 Promise / 同一条上游流，不再各自触发一次风控。
+  const inflight = new Map();
 
-  // 取流 + 解析 Range + 读首块。fresh=true 时绕过 provider 的取址缓存（换节点用）。
-  async function resolveOnce(epId, wanted, rangeHeader, fresh) {
-    const stream = await withTimeout(
+  function streamFor(epId, wanted, fresh) {
+    const key = epId + "|" + wanted + (fresh ? "|fresh" : "");
+    const running = inflight.get(key);
+    if (running) {
+      DEDUPE.shared += 1;
+      return running;
+    }
+    DEDUPE.lookups += 1;
+    const task = withTimeout(
       provider.stream(epId, fresh ? { quality: wanted, fresh: true } : { quality: wanted }),
       30000,
       "视频流初始化超时"
-    );
+    ).finally(() => {
+      if (inflight.get(key) === task) inflight.delete(key);
+    });
+    inflight.set(key, task);
+    return task;
+  }
+
+  // 取流 + 解析 Range + 读首块。fresh=true 时绕过 provider 的取址缓存（换节点用）。
+  async function resolveOnce(epId, wanted, rangeHeader, fresh) {
+    const stream = await streamFor(epId, wanted, fresh);
     const range = byteRange(rangeHeader, stream.total);
     if (!range) return { stream, range: null, first: null };
     const [start, end] = range;
@@ -61,7 +81,7 @@ export function createStreamHandler({ provider, limit = 6 }) {
     }
   }
 
-  return async function serveStream(req, res, epId, quality, allowVvc = false) {
+  const serveStream = async function (req, res, epId, quality, allowVvc = false) {
     const wanted = String(quality || "auto").toLowerCase();
     if (!QUALITIES.has(wanted)) throw fail("BAD_INPUT", "清晰度参数无效");
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
@@ -166,4 +186,8 @@ export function createStreamHandler({ provider, limit = 6 }) {
       active--;
     }
   };
+
+  // 供 /api/metrics 观察去重效果：shared 越多说明并发同集请求被合并得越多。
+  serveStream.dedupe = () => ({ ...DEDUPE });
+  return serveStream;
 }
