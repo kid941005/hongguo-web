@@ -397,6 +397,17 @@ export const provider = {
       return { tiers: [], expire: 0, error: String((error && error.message) || error) };
     }
   },
+  // 节点/模型失效时清掉这一集的取址缓存，下一次 stream() 会重新走上游取址（A3 首块校验失败时调用）。
+  // 只清这一集，不动 pageCache/appSearchCache：那两类与播放地址无关。
+  invalidate(id) {
+    const key = String(id);
+    api.streamCache.delete(`${key}|auto`);
+    api.videoInfoCache.delete(key);
+    if (typeof official.invalidate === "function") official.invalidate(key);
+    METRICS.invalidations += 1;
+    METRICS.lastInvalidationAt = Date.now();
+    return true;
+  },
   metrics() {
     return {
       stream: {
@@ -409,6 +420,8 @@ export const provider = {
         officialFails: METRICS.officialFails,
         lastOfficialError: METRICS.lastOfficialError,
         lastOfficialErrorAt: METRICS.lastOfficialErrorAt,
+        invalidations: METRICS.invalidations,
+        lastInvalidationAt: METRICS.lastInvalidationAt,
       },
       official: official.stats,
       breaker: {
@@ -439,6 +452,8 @@ const STREAM_BREAKER = { fails: 0, openUntil: 0, lastError: "" };
 const METRICS = {
   attempts: 0, failures: 0, empty: 0, retries: 0, lastError: "", lastErrorAt: 0,
   officialFails: 0, lastOfficialError: "", lastOfficialErrorAt: 0,
+  // 首块校验失败后清缓存重取的次数（A3）：持续增长说明上游签名/CDN 在频繁变化。
+  invalidations: 0, lastInvalidationAt: 0,
 };
 
 const CACHE_TTL = 300000;

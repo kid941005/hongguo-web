@@ -1,4 +1,5 @@
 import { fail } from "./errors.mjs";
+import { probeMp4Head } from "./mp4.mjs";
 
 const CHUNK = 1024 * 1024;
 // 允许的清晰度参数：auto=最高可用档，compat=官网 360P 明文兜底，其余按档位名精确匹配。
@@ -29,6 +30,24 @@ export function byteRange(value, total) {
 export function createStreamHandler({ provider, limit = 6 }) {
   let active = 0;
 
+  // 取流 + 解析 Range + 读首块。fresh=true 时绕过 provider 的取址缓存（换节点用）。
+  async function resolveOnce(epId, wanted, rangeHeader, fresh) {
+    const stream = await withTimeout(
+      provider.stream(epId, fresh ? { quality: wanted, fresh: true } : { quality: wanted }),
+      30000,
+      "视频流初始化超时"
+    );
+    const range = byteRange(rangeHeader, stream.total);
+    if (!range) return { stream, range: null, first: null };
+    const [start, end] = range;
+    const first = await withTimeout(
+      stream.chunk(start, Math.min(start + CHUNK - 1, end)),
+      20000,
+      "视频分块读取超时"
+    );
+    return { stream, range, first };
+  }
+
   return async function serveStream(req, res, epId, quality) {
     const wanted = String(quality || "auto").toLowerCase();
     if (!QUALITIES.has(wanted)) throw fail("BAD_INPUT", "清晰度参数无效");
@@ -49,12 +68,47 @@ export function createStreamHandler({ provider, limit = 6 }) {
 
     active++;
     try {
-      const stream = await withTimeout(provider.stream(epId, { quality: wanted }), 30000, "视频流初始化超时");
-      const range = byteRange(req.headers.range, stream.total);
-      if (!range) {
-        res.writeHead(416, { "content-range": "bytes */" + stream.total });
+      let attempt = await resolveOnce(epId, wanted, req.headers.range, false);
+      if (!attempt.range) {
+        res.writeHead(416, { "content-range": "bytes */" + attempt.stream.total });
         return res.end();
       }
+
+      // 首块结构校验：只在从头取时做（Range 落在文件中间时首块本来就不是盒子头）。
+      // 不合法说明取到的节点/模型已失效，清缓存重取一次，仍不对才报错。
+      let headRetried = false;
+      if (attempt.range[0] === 0 && attempt.first && attempt.first.length >= 8) {
+        const probe = probeMp4Head(attempt.first);
+        if (!probe.ok) {
+          console.warn(
+            JSON.stringify({
+              event: "stream_head_invalid",
+              epId,
+              quality: wanted,
+              box: probe.box,
+              size: probe.size,
+              bytes: probe.bytes,
+              reason: probe.reason,
+            })
+          );
+          headRetried = true;
+          if (typeof provider.invalidate === "function") provider.invalidate(epId);
+          attempt = await resolveOnce(epId, wanted, req.headers.range, true);
+          if (!attempt.range) {
+            res.writeHead(416, { "content-range": "bytes */" + attempt.stream.total });
+            return res.end();
+          }
+          const again = attempt.first && attempt.first.length >= 8 ? probeMp4Head(attempt.first) : { ok: true };
+          if (!again.ok) {
+            throw fail(
+              "UPSTREAM_EMPTY",
+              "红果播放源返回异常数据（首块不是 MP4），已重新取址一次仍失败，请稍后重试或切换数据源"
+            );
+          }
+        }
+      }
+
+      const { stream, range, first } = attempt;
       const [start, end] = range;
       const headers = {
         "content-type": "video/mp4",
@@ -65,10 +119,10 @@ export function createStreamHandler({ provider, limit = 6 }) {
         "x-stream-quality": String(stream.quality || wanted),
         "x-stream-codec": String(stream.codec || ""),
       };
+      if (headRetried) headers["x-stream-head-retry"] = "1";
       if (req.headers.range) headers["content-range"] = "bytes " + start + "-" + end + "/" + stream.total;
 
-      // 先取首块：解密失败时还能回错误码，而不是发出半截响应
-      const first = await withTimeout(stream.chunk(start, Math.min(start + CHUNK - 1, end)), 20000, "视频分块读取超时");
+      // 首块已经取到并校验过，这里才写头：解密失败时还能回错误码，而不是发出半截响应
       res.writeHead(req.headers.range ? 206 : 200, headers);
 
       for (let offset = start; offset <= end && !res.destroyed; offset += CHUNK) {

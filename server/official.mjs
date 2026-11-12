@@ -118,7 +118,7 @@ export function createOfficial({ register, deriveContentKey } = {}) {
   let identityAt = identity ? Number(identity.time) || 0 : 0;
   let identityPending = null;
 
-  const stats = { requests: 0, ok: 0, empty: 0, failed: 0, lastError: "", lastErrorAt: 0, registered: 0 };
+  const stats = { requests: 0, ok: 0, empty: 0, failed: 0, lastError: "", lastErrorAt: 0, registered: 0, invalidated: 0 };
 
   function markError(error) {
     stats.failed += 1;
@@ -333,6 +333,15 @@ export function createOfficial({ register, deriveContentKey } = {}) {
 
   return {
     stats,
+    // 首块解密出来不是 MP4 时，说明这份播放模型（签名 URL + 内容密钥）已失效，
+    // 清掉这一集的缓存，让下一次取址重新打上游（A3）。失败缓存同样清掉，
+    // 否则 MODEL_FAIL_TTL 内的重取会直接命中上次的错误。
+    invalidate(epId) {
+      const key = String(epId);
+      cache.delete(key);
+      stats.invalidated += 1;
+      return true;
+    },
     async info(epId) {
       const model = await fetchModel(epId);
       const tiers = tiersOf(model);
