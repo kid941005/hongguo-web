@@ -347,7 +347,8 @@ export function createServer({ provider, sources, catalog, users = null, monitor
     }],
 
     // ---- 内置红果：服务端解密流 ----
-    ["GET", /^\/api\/stream\/(\d{1,30})$/, ({ req, res, params }) => serveStream(req, res, params[0])],
+    ["GET", /^\/api\/stream\/(\d{1,30})$/, ({ req, res, params, q }) =>
+      serveStream(req, res, params[0], q.get("q") || "auto")],
   ];
 
   async function dispatch(req, res) {

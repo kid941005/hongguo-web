@@ -9,6 +9,7 @@
     hls: null, histKey: null, lastSave: 0, pendingSeek: 0,
     pendingResume: null, pendingPlay: null,
     rate: 1, quality: -1, levels: [], qualityOptions: [], qualityNote: '',
+    qualityKey: '', playKind: '', hevcCap: null, hevcFallback: false, silentSeek: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
     user: null, favs: [], follows: []
@@ -976,6 +977,60 @@
     setRate(RATES[i]);
   }
 
+  // ---- HEVC 能力探测 ----
+  // 红果官方高清档全部是 HEVC(hvc1)，Chrome 在 Windows 上默认不能解码，会直接报
+  // MEDIA_ERR_SRC_NOT_SUPPORTED。先探测能力，能省掉一次必然失败的起播；
+  // 用户也可以用 localStorage hg_hevc=1/0 手动覆盖（例如装了 HEVC 扩展的 Edge）。
+  var HEVC_KEY = 'hg_hevc';
+  var HEVC_CODECS = ['video/mp4; codecs="hvc1.1.6.L120.90"', 'video/mp4; codecs="hev1.1.6.L120.90"'];
+  function hevcSupported() {
+    try {
+      var forced = localStorage.getItem(HEVC_KEY);
+      if (forced === '1') return true;
+      if (forced === '0') return false;
+    } catch (e) { /* 隐私模式 */ }
+    if (state.hevcCap != null) return state.hevcCap;
+    var ok = false;
+    try {
+      if (window.MediaSource && window.MediaSource.isTypeSupported) {
+        ok = HEVC_CODECS.some(function (c) { return window.MediaSource.isTypeSupported(c); });
+      }
+      if (!ok) {
+        var probe = document.createElement('video');
+        ok = !!(probe.canPlayType && HEVC_CODECS.some(function (c) { return probe.canPlayType(c) === 'probably'; }));
+      }
+    } catch (e) { ok = false; }
+    state.hevcCap = ok;
+    return ok;
+  }
+  function optionByKey(key) {
+    var opts = state.qualityOptions || [];
+    for (var i = 0; i < opts.length; i++) if (opts[i].key === key) return opts[i];
+    return null;
+  }
+  function hasHevcOption() {
+    return (state.qualityOptions || []).some(function (o) { return o.codec === 'hevc'; });
+  }
+  // 切换到指定档位：native 直链靠换 src，HLS 靠 hls.js 的 level。
+  function switchNativeQuality(o) {
+    var v = $('video'); if (!v || !o || !o.url) return false;
+    var at = v.currentTime || 0;
+    var wasPlaying = !v.paused;
+    state.qualityKey = o.key;
+    state.hevcFallback = o.key === 'compat';
+    state.pendingSeek = Math.floor(at);
+    state.silentSeek = at > 3;
+    hidePlayerError();
+    v.src = authUrl(o.url);
+    try { v.load(); } catch (e) {}
+    if (wasPlaying) {
+      var pr = v.play();
+      if (pr && pr.catch) pr.catch(function () {});
+    }
+    updateQualityBtn();
+    return true;
+  }
+
   // ---- 清晰度 / 当前分辨率 ----
   function levelLabel(lv) {
     if (!lv) return '自动';
@@ -1004,7 +1059,13 @@
   function updateQualityBtn() {
     var btn = $('btnQuality'); if (!btn) return;
     var multi = (state.qualityOptions || []).length > 1;
-    var chosen = state.quality >= 0 && state.levels[state.quality] ? levelLabel(state.levels[state.quality]) : '';
+    var chosen = '';
+    if (state.playKind === 'native' && state.qualityKey) {
+      var picked = optionByKey(state.qualityKey);
+      chosen = picked ? picked.label : '';
+    } else if (state.quality >= 0 && state.levels[state.quality]) {
+      chosen = levelLabel(state.levels[state.quality]);
+    }
     btn.textContent = '清晰度 ' + (chosen || currentResolutionLabel() || '自动');
     btn.classList.toggle('on', multi);
   }
@@ -1020,7 +1081,9 @@
     } else {
       opts.forEach(function (o) {
         var d = document.createElement('div');
-        var active = (o.levelIndex != null && o.levelIndex === state.quality) || (o.levelIndex === -1 && state.quality < 0);
+        var active = state.playKind === 'native'
+          ? (o.key != null && o.key === state.qualityKey)
+          : ((o.levelIndex != null && o.levelIndex === state.quality) || (o.levelIndex === -1 && state.quality < 0));
         d.className = 'qitem' + (active ? ' active' : '');
         d.textContent = o.label;
         d.addEventListener('click', function () { selectQuality(o); });
@@ -1063,6 +1126,16 @@
   function closeQualityMenu() { var m = $('qualityMenu'); if (m) m.classList.add('hidden'); }
   function selectQuality(o) {
     closeQualityMenu();
+    // native 直链（红果官方多档）：换 src 重载，保留播放进度。
+    if (state.playKind === 'native' && o && o.url) {
+      if (o.key === state.qualityKey) { toast('已是 ' + o.label); return; }
+      if (o.codec === 'hevc' && !hevcSupported()) {
+        toast('当前浏览器不支持 HEVC 编码，该档位无法播放');
+        return;
+      }
+      if (switchNativeQuality(o)) toast('清晰度：' + o.label);
+      return;
+    }
     if (o.levelIndex != null && state.hls && (state.qualityOptions || []).length > 1) {
       state.quality = o.levelIndex;
       try { state.hls.currentLevel = o.levelIndex; } catch (e) {}
@@ -1074,6 +1147,13 @@
   }
   // 兼容旧调试钩子：无多档时提示，有 HLS 多档时在档位间循环。
   function cycleQuality() {
+    if (state.playKind === 'native' && (state.qualityOptions || []).length > 1) {
+      var nat = state.qualityOptions;
+      var cur = -1;
+      for (var i = 0; i < nat.length; i++) if (nat[i].key === state.qualityKey) cur = i;
+      selectQuality(nat[(cur + 1) % nat.length]);
+      return;
+    }
     var opts = (state.qualityOptions || []).filter(function (o) { return o.levelIndex != null; });
     if (opts.length <= 1) { toast('该视频只有单一清晰度'); return; }
     var idx = opts.findIndex(function (o) { return o.levelIndex === state.quality; });
@@ -1193,19 +1273,34 @@
 
   function openPlayer(url, type, startAt, auto, qualityInfo) {
     var v = $('video');
-    url = authUrl(url);
     state.pendingSeek = Math.max(0, Math.floor(startAt || 0));
     state.lastSave = 0;
     state.quality = -1;
     state.levels = [];
     state.qualityOptions = [];
     state.qualityNote = '';
+    state.qualityKey = '';
+    state.hevcFallback = false;
+    state.silentSeek = false;
+    state.playKind = type === 'hls' ? 'hls' : 'native';
     if (qualityInfo && Array.isArray(qualityInfo.options) && qualityInfo.options.length) {
       state.qualityOptions = qualityInfo.options.map(function (o) {
-        return { key: o.key, label: o.label, height: o.height, levelIndex: null };
+        return { key: o.key, label: o.label, height: o.height, codec: o.codec || '', url: o.url || '', levelIndex: null };
       });
       state.qualityNote = qualityInfo.note || '';
+      // 浏览器不支持 HEVC 时最高档必然解不出来，直接起播 360P 兼容线路，省掉一次失败重试。
+      if (state.playKind === 'native' && hasHevcOption() && !hevcSupported()) {
+        var compat = optionByKey('compat');
+        if (compat && compat.url) {
+          url = compat.url;
+          state.qualityKey = 'compat';
+          state.hevcFallback = true;
+          if (!state.hevcWarned) { state.hevcWarned = true; toast('当前浏览器不支持 HEVC 高清编码，已使用 360P 兼容线路'); }
+        }
+      }
     }
+    if (state.playKind === 'native' && !state.qualityKey && optionByKey('auto')) state.qualityKey = 'auto';
+    url = authUrl(url);
     updateResBadge();
     updateQualityBtn();
     destroyHls();
@@ -1314,9 +1409,11 @@
       updateQualityBtn();
       if (state.pendingSeek > 3 && isFinite(v.duration) && state.pendingSeek < v.duration - 3) {
         try { v.currentTime = state.pendingSeek; } catch (e) {}
-        toast('已续播至 ' + fmtDur(state.pendingSeek));
+        // 切换清晰度时也走 pendingSeek，但那是同一个位置，不必提示「已续播」。
+        if (!state.silentSeek) toast('已续播至 ' + fmtDur(state.pendingSeek));
       }
       state.pendingSeek = 0;
+      state.silentSeek = false;
     });
     v.addEventListener('timeupdate', function () {
       if (!state.histKey) return;
@@ -1336,6 +1433,33 @@
       var dur = Math.floor(v.duration || 0);
       if (state.histKey) histUpdate(dur, dur, true);
       scheduleAutoNext();
+    });
+    // HEVC 在 Chrome/Edge 上常见「有声音没画面」：容器与音轨能解，视频轨不支持，且不触发 error。
+    // 播了 2 秒还拿不到 videoWidth 就判定该档解不出来，回落 360P 兼容线路。
+    v.addEventListener('timeupdate', function () {
+      if (state.playKind !== 'native' || state.hevcFallback) return;
+      if (v.paused || v.readyState < 2) return;
+      if (v.currentTime < 2 || v.videoWidth > 0) return;
+      var compat = optionByKey('compat');
+      if (!compat || !compat.url) return;
+      state.hevcFallback = true;
+      toast('该清晰度无法解码，已自动切换到 360P 兼容线路');
+      switchNativeQuality(compat);
+    });
+    // 编码不支持（Chrome/Windows 上的 HEVC 很常见）时自动回落到 360P 兼容线路，而不是只弹错。
+    v.addEventListener('error', function () {
+      var err = v.error;
+      if (!err || (err.code !== 3 && err.code !== 4)) return;
+      if (state.playKind !== 'native') return;
+      if (state.hevcFallback) {
+        showPlayerError('播放失败：当前档位无法解码，可尝试切换数据源');
+        return;
+      }
+      var compat = optionByKey('compat');
+      if (!compat || !compat.url) return;
+      state.hevcFallback = true;
+      toast('该编码无法解码，已自动切换到 360P 兼容线路');
+      switchNativeQuality(compat);
     });
     v.addEventListener('dblclick', function (e) { e.preventDefault(); toggleFullscreen(); });
     document.addEventListener('keydown', onPlayerKey);

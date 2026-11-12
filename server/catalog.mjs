@@ -359,6 +359,11 @@ export function createCatalog({ provider, sources }) {
         id: String(ep.id),
         name: ep.title || "第 " + (index + 1) + " 集",
       }));
+      // 用户看详情页时顺手预热第一集的官方清晰度（不阻塞详情返回）：
+      // 点播放时 /api/play 直接命中缓存，起播少等 1–2 秒，也不会因超时误判「没有高清档」。
+      if (episodes.length && typeof provider.quality === "function") {
+        Promise.resolve(provider.quality(episodes[0].id)).catch(() => {});
+      }
       return {
         source: entry.id,
         id: String(id),
@@ -401,15 +406,30 @@ export function createCatalog({ provider, sources }) {
     if (!id) throw fail("BAD_INPUT", "缺少剧集 id");
     if (entry.type === "builtin") {
       if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
-      // 红果官方明文兜底流固定 360P；高清（720P+）走 DRM 保护通道，
-      // 本站服务端未实现 DRM 解密，故只标注单档并说明原因，不伪造选项。
+      // 官方接口能取到真实多档（360P–1080P，全部 HEVC + CENC），服务端解密后按 Range 转发。
+      // 菜单要如实反映可用档位：查不到档位时只列 360P 兼容档，不伪造点不开的高清项。
+      const info = await provider.quality(String(id));
+      const tiers = Array.isArray(info.tiers) && info.tiers.length ? info.tiers : null;
+      const options = [
+        { key: "auto", label: "自动（最高）", height: 0, codec: "", url: "/api/stream/" + id + "?q=auto" },
+        ...(tiers || []).map((tier) => ({
+          key: tier.key,
+          label: tier.label,
+          height: tier.height,
+          codec: tier.codec,
+          url: "/api/stream/" + id + "?q=" + encodeURIComponent(tier.key),
+        })),
+        { key: "compat", label: "360P 兼容", height: 360, codec: "h264", url: "/api/stream/" + id + "?q=compat" },
+      ];
       return {
         type: "native",
-        url: "/api/stream/" + id,
+        url: "/api/stream/" + id + "?q=auto",
         contentType: "video/mp4",
         quality: {
-          options: [{ key: "auto", label: "360P", height: 360 }],
-          note: "红果官方高清（720P 及以上）为 DRM 保护通道，本站当前仅提供 360P 明文流。",
+          options,
+          note: tiers
+            ? "高清档为 HEVC 编码：浏览器不支持 HEVC 时会自动回落到 360P 兼容线路。"
+            : "未取到高清档（官方接口暂不可用），当前仅提供 360P 兼容线路。",
         },
       };
     }
@@ -572,7 +592,7 @@ export function createCatalog({ provider, sources }) {
               const detail = await withTimeout(provider.detail(String(first.id)), 15000, "健康检查详情超时");
               const episode = detail.episodes && detail.episodes[0];
               if (!episode) return null;
-              const stream = await withTimeout(provider.stream(String(episode.id), false, false), 20000, "健康检查取流超时");
+              const stream = await withTimeout(provider.stream(String(episode.id), { track: false }), 20000, "健康检查取流超时");
               const chunk = await stream.chunk(0, Math.min(15, Math.max(0, stream.total - 1)));
               const head = Buffer.from(chunk).subarray(4, 8).toString("ascii");
               return {

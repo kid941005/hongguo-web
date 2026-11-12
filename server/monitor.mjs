@@ -20,7 +20,7 @@ export function createMonitor({
 } = {}) {
   const state = {
     status: "unknown", // unknown | ok | degraded | down
-    channel: "", // web（主通道） | app（回落通道）
+    channel: "", // official（高清多档） | web（官网明文 360P） | app（App 明文通道）
     reason: "",
     fails: 0,
     checks: 0,
@@ -135,7 +135,7 @@ export function createMonitor({
     try {
       const probe = await resolveProbe();
       // fresh=true 绕过取址缓存，track=true 让失败计入熔断器与 /api/metrics。
-      const stream = await provider.stream(probe.vid, true, true);
+      const stream = await provider.stream(probe.vid, { fresh: true, track: true });
       const chunk = await stream.chunk(0, 15);
       const head = Buffer.from(chunk).subarray(4, 8).toString("ascii");
       if (!(chunk.length >= 8 && head === "ftyp")) throw fail("UPSTREAM_EMPTY", "首块不是 ftyp（" + (head || "空") + "）");
@@ -144,8 +144,14 @@ export function createMonitor({
       state.lastError = "";
       state.fails = 0;
       state.okChecks += 1;
-      state.channel = stream.channel || "app";
-      setStatus(state.channel === "web" ? "ok" : "degraded", state.channel === "web" ? "" : "web 通道不可用，已回落到 app 通道");
+      // 官方通道（official，HEVC 多档）与官网明文通道（web）都算健康；
+      // 只有官方失败后回落明文 360P 时才是 degraded——画质降级但能播。
+      state.channel = stream.channel || "web";
+      const degraded = state.channel !== "official";
+      setStatus(
+        degraded ? "degraded" : "ok",
+        degraded ? "官方高清通道不可用，已回落到 360P 兼容通道" : ""
+      );
       return snapshot();
     } catch (error) {
       const message = String((error && error.message) || error).slice(0, 300);

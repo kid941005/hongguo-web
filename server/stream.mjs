@@ -1,6 +1,8 @@
 import { fail } from "./errors.mjs";
 
 const CHUNK = 1024 * 1024;
+// 允许的清晰度参数：auto=最高可用档，compat=官网 360P 明文兜底，其余按档位名精确匹配。
+const QUALITIES = new Set(["auto", "1080p", "720p", "540p", "480p", "360p", "compat"]);
 
 function withTimeout(promise, ms, message) {
   let timer;
@@ -27,7 +29,9 @@ export function byteRange(value, total) {
 export function createStreamHandler({ provider, limit = 6 }) {
   let active = 0;
 
-  return async function serveStream(req, res, epId) {
+  return async function serveStream(req, res, epId, quality) {
+    const wanted = String(quality || "auto").toLowerCase();
+    if (!QUALITIES.has(wanted)) throw fail("BAD_INPUT", "清晰度参数无效");
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
     if (!/^[1-9]\d{0,29}$/.test(epId)) throw fail("BAD_INPUT", "剧集 id 无效");
 
@@ -45,7 +49,7 @@ export function createStreamHandler({ provider, limit = 6 }) {
 
     active++;
     try {
-      const stream = await withTimeout(provider.stream(epId), 30000, "视频流初始化超时");
+      const stream = await withTimeout(provider.stream(epId, { quality: wanted }), 30000, "视频流初始化超时");
       const range = byteRange(req.headers.range, stream.total);
       if (!range) {
         res.writeHead(416, { "content-range": "bytes */" + stream.total });
@@ -57,6 +61,9 @@ export function createStreamHandler({ provider, limit = 6 }) {
         "accept-ranges": "bytes",
         "content-length": end - start + 1,
         "cache-control": "no-store",
+        // 实际选中的档位与编码：前端/测试可据此判断是否发生了降级（如 1080p → 360P）。
+        "x-stream-quality": String(stream.quality || wanted),
+        "x-stream-codec": String(stream.codec || ""),
       };
       if (req.headers.range) headers["content-range"] = "bytes " + start + "-" + end + "/" + stream.total;
 

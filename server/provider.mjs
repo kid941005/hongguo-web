@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import zlib from "node:zlib";
 import axios from "axios";
 import { fail } from "./errors.mjs";
+import { createOfficial } from "./official.mjs";
 
 // Trusted, pinned GPL source. This is a compatibility wrapper, not a sandbox for user scripts.
 const source = fs.readFileSync(
@@ -29,11 +30,16 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, websiteSearch, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, websiteSearch, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, rankPageRich, rule, CATEGORIES, CATEGORY_CONFIG, FILTERS, channelStats, registerPlaybackDevice, deriveContentKey};",
   context,
   { timeout: 5000 }
 );
 const api = context.api;
+// 官方播放模型（多档 HEVC）：设备身份注册与内容密钥派生都复用 vendor 里已验证的实现。
+const official = createOfficial({
+  register: () => api.registerPlaybackDevice(),
+  deriveContentKey: (value) => api.deriveContentKey(value),
+});
 const SITE = "https://hongguoduanju.com";
 const card = (row) => ({
   id: String(row.url),
@@ -231,13 +237,43 @@ export const provider = {
     }
     return recommendPoolPending;
   },
-  async stream(id, fresh = false, track = true) {
+  // 取流：quality = auto | 1080p | 720p | 540p | 480p | 360p | compat
+  // 官方 App 通道优先（真实多档、HEVC + CENC）；失败或显式 compat 时回落官网明文 360P（H.264）。
+  async stream(id, { fresh = false, quality = "auto", track = true } = {}) {
+    const wanted = String(quality || "auto").toLowerCase();
     if (fresh) {
       api.streamCache.delete(`${id}|auto`);
       api.videoInfoCache.delete(id);
     }
-    const now = Date.now();
-    if (STREAM_BREAKER.openUntil > now) {
+    if (wanted !== "compat") {
+      try {
+        const picked = await official.stream(id, wanted);
+        const prepared = await api.prepareHeader(picked.stream);
+        if (track) {
+          STREAM_BREAKER.fails = 0;
+          STREAM_BREAKER.openUntil = 0;
+        }
+        return {
+          total: prepared.total,
+          channel: "official",
+          quality: picked.tier.key,
+          codec: picked.tier.codec,
+          chunk: async (start, end) =>
+            api.decryptPartial(
+              (await api.remoteRange(picked.stream, start, end)).data,
+              start,
+              picked.stream.key,
+              prepared
+            ),
+        };
+      } catch (error) {
+        // 高清通道失败只降级，不计入官网通道熔断：360P 兜底通常仍然可用。
+        METRICS.officialFails += 1;
+        METRICS.lastOfficialError = String((error && error.message) || error).slice(0, 300);
+        METRICS.lastOfficialErrorAt = Date.now();
+      }
+    }
+    if (STREAM_BREAKER.openUntil > Date.now()) {
       throw fail("UPSTREAM_EMPTY", "红果播放源暂不可用，正在自动恢复，请切换数据源或稍后重试");
     }
     if (track) METRICS.attempts += 1;
@@ -265,6 +301,8 @@ export const provider = {
       return {
         total: prepared.total,
         channel: stream.channel || "app",
+        quality: "compat",
+        codec: "h264",
         chunk: async (start, end) =>
           api.decryptPartial(
             (await api.remoteRange(stream, start, end)).data,
@@ -292,6 +330,26 @@ export const provider = {
       throw fail("UPSTREAM_ERROR", "红果播放源异常：" + message);
     }
   },
+  // 清晰度清单：给 /api/play 用，失败不抛错（前端只显示 360P 兼容档）。
+  // timeoutMs 有上限：/api/play 不能为了菜单把起播拖住。
+  async quality(id, timeoutMs = 6000) {
+    try {
+      const info = await withTimeout(official.info(String(id)), timeoutMs, "清晰度查询超时");
+      return {
+        tiers: info.tiers.map((tier) => ({
+          key: tier.key,
+          label: tier.label,
+          height: tier.height,
+          codec: tier.codec,
+          size: tier.size,
+          bitrate: tier.bitrate,
+        })),
+        expire: info.expire,
+      };
+    } catch (error) {
+      return { tiers: [], expire: 0, error: String((error && error.message) || error) };
+    }
+  },
   metrics() {
     return {
       stream: {
@@ -301,7 +359,11 @@ export const provider = {
         retries: METRICS.retries,
         lastError: METRICS.lastError,
         lastErrorAt: METRICS.lastErrorAt,
+        officialFails: METRICS.officialFails,
+        lastOfficialError: METRICS.lastOfficialError,
+        lastOfficialErrorAt: METRICS.lastOfficialErrorAt,
       },
+      official: official.stats,
       breaker: {
         fails: STREAM_BREAKER.fails,
         open: STREAM_BREAKER.openUntil > Date.now(),
@@ -327,7 +389,10 @@ function isTransientNetworkError(error) {
 const STREAM_BREAKER_THRESHOLD = 3;
 const STREAM_BREAKER_COOLDOWN = 45000;
 const STREAM_BREAKER = { fails: 0, openUntil: 0, lastError: "" };
-const METRICS = { attempts: 0, failures: 0, empty: 0, retries: 0, lastError: "", lastErrorAt: 0 };
+const METRICS = {
+  attempts: 0, failures: 0, empty: 0, retries: 0, lastError: "", lastErrorAt: 0,
+  officialFails: 0, lastOfficialError: "", lastOfficialErrorAt: 0,
+};
 
 const CACHE_TTL = 300000;
 const CACHE_MAX = 100;
