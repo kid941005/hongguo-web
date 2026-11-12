@@ -98,11 +98,12 @@ function pageState(key) {
   return state;
 }
 
-function packPage(state, page, list, hasMoreOverride) {
+function packPage(state, page, list, hasMoreOverride, pageCount) {
   const hasMore = typeof hasMoreOverride === "boolean"
     ? hasMoreOverride
     : (list.length > 0 && page < MAX_PAGE);
-  const result = { page: page, pagecount: hasMore ? page + 1 : page, hasMore: hasMore, list: list };
+  // pagecount 只回真实总页数（0 = 源端不提供），不再用 page+1 伪造。
+  const result = { page: page, pagecount: Number(pageCount) || 0, hasMore: hasMore, list: list };
   state.pages.set(page, result);
   state.updated = Date.now();
   return result;
@@ -160,7 +161,7 @@ async function category(tid, page, filter, extend) {
     const list = mapElements((response.result && response.result.elements) || []);
     // 一页不满即到底；满页时多拉一页空页作为结束信号
     const hasMore = list.length >= PAGE_SIZE && current < MAX_PAGE;
-    return packPage(state, current, list, hasMore);
+    return packPage(state, current, list, hasMore, 0);
   } catch (err) {
     if (current > 1) {
       return { page: current, pagecount: current, hasMore: false, list: [] };
@@ -225,7 +226,7 @@ async function search(keyword, quick, page) {
     const response = await requestJson(url);
     const list = mapElements((response.result && response.result.elements) || []);
     // 搜索接口不返回总数/游标：本页有数据就继续，拉到空页为止
-    return packPage(state, current, list, list.length > 0 && current < MAX_PAGE);
+    return packPage(state, current, list, undefined, 0);
   } catch (err) {
     if (current > 1) {
       return { page: current, pagecount: current, hasMore: false, list: [] };

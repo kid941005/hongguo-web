@@ -50,9 +50,10 @@ function pageState(key) {
   return state;
 }
 
-function packPage(state, page, list, hasMore) {
+function packPage(state, page, list, hasMore, pageCount) {
   const more = Boolean(hasMore) && list.length > 0 && page < MAX_PAGE;
-  const result = { page: page, pagecount: more ? page + 1 : page, hasMore: more, list: list };
+  // pagecount 只回真实总页数（0 = 源端不提供），不再用 page+1 伪造。
+  const result = { page: page, pagecount: Number(pageCount) || 0, hasMore: more, list: list };
   state.pages.set(page, result);
   state.updated = Date.now();
   return result;
@@ -168,7 +169,7 @@ async function category(tid, page, filter, extend) {
     const rows = (data && data.list) || [];
     const list = mapTheaters(rows);
     const hasMore = rows.length >= PAGE_SIZE && current < MAX_PAGE;
-    return packPage(state, current, list, hasMore);
+    return packPage(state, current, list, hasMore, 0);
   } catch (err) {
     if (current > 1) return { page: current, pagecount: current, hasMore: false, list: [] };
     throw err;
@@ -226,7 +227,7 @@ async function search(keyword, quick, page) {
       if (item.vod_id) list.push(item);
     }
     // 搜索结果接口不分页：只返回第一页，标记结束避免无限请求
-    return packPage(state, current, current === 1 ? list : [], false);
+    return packPage(state, current, current === 1 ? list : [], false, 0);
   } catch (err) {
     if (current > 1) return { page: current, pagecount: current, hasMore: false, list: [] };
     throw err;

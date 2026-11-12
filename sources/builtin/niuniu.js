@@ -355,9 +355,12 @@ function pageState(key) {
   while (states.size > 32) states.delete(states.keys().next().value);
   return state;
 }
-function packPage(state, page, list, hasMore) {
-  const more = Boolean(hasMore) && list.length > 0 && page < MAX_PAGE;
-  const result = { page: page, pagecount: more ? page + 1 : page, hasMore: more, list: list };
+function packPage(state, page, list, hasMore, pageCount) {
+  const more = hasMore === undefined
+    ? (list.length > 0 && page < MAX_PAGE)
+    : (Boolean(hasMore) && list.length > 0 && page < MAX_PAGE);
+  // pagecount 只回真实总页数（0 = 源端不提供），不再用 page+1 伪造。
+  const result = { page: page, pagecount: Number(pageCount) || 0, hasMore: more, list: list };
   state.pages.set(page, result);
   state.updated = Date.now();
   return result;
@@ -640,8 +643,9 @@ async function category(tid, page, filter, extend) {
     const payload = data.data || {};
     const list = await mapRecords(payload.records || []);
     const total = number(payload.total);
-    const hasMore = total > 0 ? current * PAGE_SIZE < total : list.length >= PAGE_SIZE;
-    return packPage(state, current, list, hasMore);
+    // total 可信时用真实总页数；拿不到就交给 catalog 的「满页 + 新 id」规则，禁止用条数猜。
+    const hasMore = total > 0 ? current * PAGE_SIZE < total : undefined;
+    return packPage(state, current, list, hasMore, total > 0 ? Math.ceil(total / PAGE_SIZE) : 0);
   } catch (err) {
     if (current > 1) return { page: current, pagecount: current, hasMore: false, list: [] };
     throw err;
@@ -662,8 +666,8 @@ async function search(keyword, quick, page) {
     const payload = data.data || {};
     const list = await mapRecords(payload.records || []);
     const total = number(payload.total);
-    const hasMore = total > 0 ? current * SEARCH_SIZE < total : list.length >= SEARCH_SIZE;
-    return packPage(state, current, list, hasMore);
+    const hasMore = total > 0 ? current * SEARCH_SIZE < total : undefined;
+    return packPage(state, current, list, hasMore, total > 0 ? Math.ceil(total / SEARCH_SIZE) : 0);
   } catch (err) {
     if (current > 1) return { page: current, pagecount: current, hasMore: false, list: [] };
     throw err;
@@ -776,7 +780,13 @@ async function play(flag, id, flags) {
         if (/^https?:\/\//i.test(url)) return { parse: 0, url: url, header: { "User-Agent": UA } };
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    // 上游网络/限流故障不能当成「没有这一集」：打上 UPSTREAM_FAILED 让 catalog 回 502。
+    const message = text(e && e.message) || String(e || "");
+    if (/ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket|TLS|HTTP\s*\d{3}|timeout|超时|限流|风控/i.test(message)) {
+      return { parse: 0, url: "", header: {}, error: "UPSTREAM_FAILED: " + message.slice(0, 200) };
+    }
+  }
   return { parse: 0, url: "", header: {}, error: "MISSING_EPISODE" };
 }
 

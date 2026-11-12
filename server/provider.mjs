@@ -188,6 +188,8 @@ export const provider = {
     return {
       items: cards(pageData.recommendList.map(api.itemToCard)),
       page,
+      // 官网 loaderData 自带真实分页（实测 page=5 时 totalPages=34），交给 catalog 判定 hasMore
+      pageCount: Number(pageData?.pagination?.totalPages) || 0,
       classes: api.CATEGORIES.map((entry) => ({
         id: String(entry.type_id),
         name: String(entry.type_name || entry.type_id),
@@ -215,12 +217,14 @@ export const provider = {
       return {
         items: cards(rows.map(api.itemToCard)),
         page,
-        hasMore: totalPages ? page < totalPages : rows.length >= 24,
+        pageCount: totalPages,
+        hasMore: totalPages ? page < totalPages : false,
       };
     }
     const rows = await api.rule["一级"](id, page, {}, filters || {});
     const items = cards(Array.isArray(rows) ? rows : []);
-    return { items, page, hasMore: items.length >= 20 };
+    // 该通道不返回分页信息：pageCount=0 让 catalog 走「满页 + 新 id」规则，禁止用条数猜 hasMore
+    return { items, page, pageCount: 0 };
   },
   // 官网 /api/search/result 是搜索页自身的 CSR 数据源：只校验 UA，既不走 App 签名，
   // 也不依赖 SSR（搜索页已被 sdk-glue 反爬壳换成 CSR）。App 签名接口与 SSR 解析降为兜底。
@@ -232,6 +236,7 @@ export const provider = {
       return {
         items: cards(result.list),
         page: result.page || page,
+        pageCount: Number(result.totalPages) || 0,
         hasMore: Boolean(result.hasMore),
         total: result.total || 0,
         channel: "web",

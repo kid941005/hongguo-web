@@ -14,6 +14,14 @@ const TIMEOUT_AGGREGATE = 12000; // 聚合搜索单源上限：慢源不拖住�
 // 模板/示例源不参与聚合，避免「示例剧」和 example.com 404 污染结果。
 const AGGREGATE_SKIP = new Set(["template", "maccms"]);
 const RECOMMEND_PER_PAGE = 24;
+// 翻页硬上限：任何列表翻到第 MAX_PAGE 页一律视为「没有下一页」。
+// 「本页有数据/本页条数 >= 24 就算还有下一页」这类恒真启发式是无限滚动的根源，统一在这里兜住。
+const MAX_PAGE = 20;
+// 源根本没按关键词检索时（红果官网无命中会返回推荐池、七猫/西饭会忽略关键词）给前端的统一提示。
+const SEARCH_FALLBACK_REASON = "该源未按关键词检索，以下为源返回的热门内容";
+// 翻页记忆：同一「源 + 列表 + 关键词」记住各页 id，用来判断本页是否真的在推进。
+const PAGE_MEMORY_MAX = 64;
+const PAGE_MEMORY_PAGES = 8;
 // 跨源降级：主源取不到流时按剧名去其它源找同一部剧（模板/示例源不参与）。
 const FALLBACK_SKIP = new Set(["template", "maccms"]);
 const FALLBACK_TIMEOUT = 12000;
@@ -93,6 +101,52 @@ function titleScore(a, b) {
   return (2 * hit) / (gx.size + gy.size);
 }
 
+// ---------------- 关键词相关性 ----------------
+// 归一化：小写 + 去掉空白与常见标点（与 titleKey 同一套噪声字符）。
+const KW_NOISE = /[\s\u3000·・:：!！?？,，.。、\-—_~～|/\\()（）\[\]【】{}<>《》"'“”‘’#*+]/g;
+const KW_CJK = /[\u4e00-\u9fff]/;
+
+export function normKeyword(value) {
+  return String(value == null ? "" : value).toLowerCase().replace(KW_NOISE, "");
+}
+
+// 片段阈值：中文按字取 ceil(字数/2)（至少 2 字），英文/数字只认完整包含。
+// 为什么不是「任一 2 字 bigram」：q=「zzqxjw没有这部剧」时 bigram「没有」会把
+// 「没有道侣就会死」「冰美式没有回头客」判成命中，等于没过滤（推荐池里这类标题很多）。
+function keywordNeed(keyword) {
+  const cjk = normKeyword(keyword).replace(/[a-z0-9]/g, "").length;
+  return Math.max(2, Math.ceil(cjk / 2));
+}
+
+// 相关性判定：命中 = 标题（归一化后）包含完整关键词，或关键词里足够长的连续片段出现在标题里。
+function matchKeyword(text, keyword) {
+  const hay = normKeyword(text);
+  const kw = normKeyword(keyword);
+  if (!hay || !kw) return false;
+  if (hay.includes(kw)) return true; // 完整命中（英文/数字也是整段命中）
+  if (!KW_CJK.test(kw)) return false; // 纯英文/数字：只认完整包含，不做片段匹配
+  const need = keywordNeed(kw);
+  if (need >= kw.length) return false;
+  for (let i = 0; i + need <= kw.length; i += 1) {
+    if (hay.includes(kw.slice(i, i + need))) return true;
+  }
+  return false;
+}
+
+// 匹配面：标题为主，另外看 remarks/tags（红果的 tags 里常写着「总裁」，标题却不写）。
+function matchText(item) {
+  const tags = Array.isArray(item.tags) ? item.tags.join(" ") : String(item.tags || "");
+  return [item.title, item.remarks, tags].filter(Boolean).join(" ");
+}
+
+// 统一后置过滤：所有源（内置红果 + JS 源）的 search 结果都要过这里。
+export function matchItems(items, keyword) {
+  const list = Array.isArray(items) ? items : [];
+  const kw = String(keyword == null ? "" : keyword).trim();
+  if (!kw) return list.slice();
+  return list.filter((item) => item && matchKeyword(matchText(item), kw));
+}
+
 // vod_play_url: 线路用 $$$ 分隔，集用 # 分隔，每集「集名$集ID」
 export function splitPlayUrl(vodPlayUrl, vodPlayFrom) {
   const urlStr = String(vodPlayUrl || "");
@@ -128,11 +182,41 @@ function headerValue(headers, name) {
   return "";
 }
 
-function nextPage(result, items, current, pageCount) {
-  // 空页永远视为结束，避免不规范源一直返回 hasMore=true 造成无限滚动。
+// 翻页记忆：按「源 + 列表 + 关键词」记住各页 id 与该列表见过的最大页大小。
+// 源没给 pagecount 时，「本页是否满页 + 是否出现上一页没有的 id」只能靠它判断。
+const pageMemory = new Map();
+function rememberPage(key, page, items) {
+  const ids = new Set(items.map((item) => String(item.id)));
+  let slot = pageMemory.get(key);
+  if (!slot) slot = { pages: new Map(), size: 0 };
+  pageMemory.delete(key); // 重新插入队尾：Map 迭代顺序≈最近使用，淘汰时先丢最久没用的
+  slot.pages.set(page, ids);
+  if (items.length > slot.size) slot.size = items.length;
+  while (slot.pages.size > PAGE_MEMORY_PAGES) slot.pages.delete(slot.pages.keys().next().value);
+  pageMemory.set(key, slot);
+  while (pageMemory.size > PAGE_MEMORY_MAX) pageMemory.delete(pageMemory.keys().next().value);
+  return { prevIds: slot.pages.get(page - 1) || null, size: slot.size };
+}
+
+// 统一翻页判定（内置源与 JS 源共用一套规则，禁止「本页条数 >= 24/20 就算还有下一页」的恒真启发式）：
+//   1) 空页一律结束（保留原有判定，避免不规范源一直返回 hasMore=true 造成无限滚动）；
+//   2) page >= MAX_PAGE 一律结束（硬上限）；
+//   3) 源明确声明 hasMore=false（JS 源自己的判断）：直接结束，不再猜；
+//   4) 源给了真实 pagecount：page < pagecount 才算有下一页；
+//   5) 源没给 pagecount：本页必须满页（达到该列表见过的最大页大小），且出现上一页没有的 id；
+//   6) 都判断不了就当作结束。
+function nextPage(items, current, pageCount, memory, explicitHasMore) {
   if (!items.length) return false;
-  if (result && !Array.isArray(result) && typeof result.hasMore === "boolean") return result.hasMore;
-  return pageCount ? current < pageCount : true;
+  const page = Number(current) || 1;
+  if (page >= MAX_PAGE) return false;
+  if (explicitHasMore === false) return false;
+  const count = Number(pageCount) || 0;
+  if (count > 0) return page < count;
+  if (!memory) return false;
+  if (items.length < memory.size) return false;
+  if (!memory.prevIds || !memory.prevIds.size) return true; // 首页没有对照：满页就先给下一页，下一页再判重
+  for (const item of items) if (!memory.prevIds.has(String(item.id))) return true;
+  return false;
 }
 
 export function classifyUrl(url) {
@@ -204,7 +288,8 @@ function createBuiltinSearch(provider) {
         source: "hongguo",
         items,
         page: Number(result.page) || page,
-        hasMore: Boolean(result.hasMore),
+        // 只透传源给的真实总页数（官网 totalPages），翻页判定统一交给 nextPage。
+        pageCount: Number(result.pageCount) || 0,
         total: Number(result.total) || 0,
         channel: result.channel || "web",
       };
@@ -232,7 +317,7 @@ function createBuiltinSearch(provider) {
       source: "hongguo",
       items: hits.slice(start, start + PER_PAGE),
       page,
-      hasMore: start + PER_PAGE < hits.length,
+      pageCount: Math.ceil(hits.length / PER_PAGE),
       poolSize: cache.items.length,
       fallback: true,
       channel: "pool",
@@ -275,7 +360,8 @@ export function createCatalog({ provider, sources }) {
         classes,
         items,
         page: pageNo,
-        hasMore: items.length >= 20,
+        // 首页看官网 loaderData 里的真实 totalPages；拿不到才按「满页 + 新 id」判。
+        hasMore: nextPage(items, pageNo, data.pageCount, rememberPage("home:" + entry.id, pageNo, items)),
         filters: data.filters || {},
       };
     }
@@ -365,48 +451,139 @@ export function createCatalog({ provider, sources }) {
           tid,
           items,
           page: pageNo,
-          hasMore: Boolean(data.hasMore),
+          hasMore: nextPage(
+            items,
+            pageNo,
+            data.pageCount,
+            rememberPage("category:" + entry.id + ":" + tid, pageNo, items),
+          ),
         };
       }
       const data = await withTimeout(provider.home(pageNo), 30000, "分类加载超时");
       const items = toItems(data.items);
-      return { source: entry.id, tid, items, page: pageNo, hasMore: items.length >= 20, classes: [] };
+      return {
+        source: entry.id,
+        tid,
+        items,
+        page: pageNo,
+        hasMore: nextPage(
+          items,
+          pageNo,
+          data.pageCount,
+          rememberPage("category:" + entry.id + ":home", pageNo, items),
+        ),
+        classes: [],
+      };
     }
     const result = await sources.runtime(entry.id).call("category", [String(tid), pageNo, {}, extend || {}], TIMEOUT_HOME);
     const items = toItems(listOf(result));
     const current = Number(result && result.page) || pageNo;
     const pageCount = Number(result && result.pagecount) || 0;
+    const sourceHasMore = result && typeof result.hasMore === "boolean" ? result.hasMore : undefined;
     return {
       source: entry.id,
       tid,
       items,
       page: current,
-      hasMore: nextPage(result, items, current, pageCount),
+      hasMore: nextPage(
+        items,
+        current,
+        pageCount,
+        rememberPage("category:" + entry.id + ":" + tid, current, items),
+        sourceHasMore,
+      ),
+    };
+  }
+
+  // 搜索三态（内置源与 JS 源统一，前端不用再自己判断）：
+  //   a) 过滤后非空：返回过滤结果，hasMore 按源的真实分页判断；
+  //   b) 过滤后为空但源有返回：说明这个源根本没按关键词检索（红果无命中会回推荐池、七猫/西饭忽略关键词），
+  //      原样返回但打 fallback 标记 + 可读提示，并且 hasMore=false（不许再宣称还有下一页）；
+  //   c) 源也没返回：空列表、hasMore=false。
+  function finalizeSearch(payload, keyword, pageNo, key) {
+    const raw = Array.isArray(payload.items) ? payload.items : [];
+    const current = Number(payload.page) || pageNo;
+    // 翻页判定用「原始条数」：过滤只决定这一页给什么，不改变源还有没有下一页。
+    const hasMore = nextPage(
+      raw,
+      current,
+      payload.pageCount,
+      rememberPage(key, current, raw),
+      payload.hasMore,
+    );
+    const base = {
+      source: payload.source,
+      page: current,
+      total: Number(payload.total) || 0,
+      channel: payload.channel || "",
+    };
+    if (payload.poolSize) base.poolSize = payload.poolSize;
+    if (!raw.length) return { ...base, items: [], hasMore: false, fallback: false };
+
+    const matched = matchItems(raw, keyword);
+    if (matched.length) {
+      const result = { ...base, items: matched, hasMore, fallback: false };
+      if (matched.length < raw.length) {
+        result.filtered = true;
+        result.matched = matched.length;
+        result.note = "已按关键词过滤：「" + keyword + "」命中 " + matched.length + "/" + raw.length + " 条。";
+      }
+      if (payload.fallback)
+        result.note = (result.note ? result.note + " " : "") + "官网搜索接口暂不可用，已改用推荐池检索。";
+      return result;
+    }
+    if (current > 1) {
+      // 翻到后面才发现整页都跟关键词无关：直接收尾，别再塞一页热门剧。
+      return { ...base, items: [], hasMore: false, fallback: false, note: "该页没有与「" + keyword + "」匹配的内容。" };
+    }
+    return {
+      ...base,
+      items: raw,
+      hasMore: false,
+      total: raw.length,
+      fallback: true,
+      fallbackReason: SEARCH_FALLBACK_REASON,
+      note: "没有找到与「" + keyword + "」相关的内容，以下是该源返回的热门内容，可换个关键词再试。",
     };
   }
 
   async function search(sourceId, keyword, page) {
     const entry = entryOf(sourceId);
     const pageNo = Number(page) || 1;
-    if (entry.type === "builtin")
-      return withTimeout(builtinSearch(keyword, pageNo), 30000, "内置源检索超时");
+    const kw = String(keyword == null ? "" : keyword);
+    if (entry.type === "builtin") {
+      const payload = await withTimeout(builtinSearch(kw, pageNo), 30000, "内置源检索超时");
+      return finalizeSearch(payload, kw, pageNo, "search:" + entry.id + ":" + normKeyword(kw));
+    }
 
-    const result = await sources.runtime(entry.id).call("search", [keyword, false, pageNo], TIMEOUT_SEARCH);
-    const items = toItems(listOf(result));
-    const current = Number(result && result.page) || pageNo;
-    const pageCount = Number(result && result.pagecount) || 0;
-    return {
-      source: entry.id,
-      items,
-      page: current,
-      hasMore: nextPage(result, items, current, pageCount),
-    };
+    const result = await sources.runtime(entry.id).call("search", [kw, false, pageNo], TIMEOUT_SEARCH);
+    return finalizeSearch(
+      {
+        source: entry.id,
+        items: toItems(listOf(result)),
+        page: Number(result && result.page) || pageNo,
+        pageCount: Number(result && result.pagecount) || 0,
+        hasMore: result && typeof result.hasMore === "boolean" ? result.hasMore : undefined,
+      },
+      kw,
+      pageNo,
+      "search:" + entry.id + ":" + normKeyword(kw),
+    );
   }
 
   async function detail(sourceId, id) {
     const entry = entryOf(sourceId);
     if (entry.type === "builtin") {
-      const data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");
+      let data;
+      try {
+        data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");
+      } catch (error) {
+        // 上游对无效 id 会抛 axios 的英文 "Request failed with status code 404"，
+        // 原样冒泡会变成 502 + 英文；这里统一成 404 NOT_FOUND，和 /api/play 的判定一致。
+        const message = String((error && error.message) || "");
+        if (/404|不存在|无效|下架|not found/i.test(message)) throw fail("NOT_FOUND", "剧集不存在或已下架");
+        throw error;
+      }
       const episodes = (data.episodes || []).map((ep, index) => ({
         id: String(ep.id),
         name: ep.title || "第 " + (index + 1) + " 集",
@@ -590,10 +767,17 @@ export function createCatalog({ provider, sources }) {
     const groups = await Promise.all(
       sources.list().sources.filter((source) => !AGGREGATE_SKIP.has(source.id)).map(async (source) => {
         const started = Date.now();
+        const kw = String(keyword == null ? "" : keyword);
         try {
+          // 内置源走同一套 finalizeSearch，聚合结果与单源搜索的 fallback/hasMore 语义完全一致。
           const result = source.type === "builtin"
-            ? await withTimeout(builtinSearch(keyword, pageNo), 30000, "内置源检索超时")
-            : await withTimeout(search(source.id, keyword, pageNo), TIMEOUT_AGGREGATE, "聚合检索超时");
+            ? finalizeSearch(
+              await withTimeout(builtinSearch(kw, pageNo), 30000, "内置源检索超时"),
+              kw,
+              pageNo,
+              "search:" + source.id + ":" + normKeyword(kw),
+            )
+            : await withTimeout(search(source.id, kw, pageNo), TIMEOUT_AGGREGATE, "聚合检索超时");
           return {
             source: source.id,
             name: source.name,
@@ -601,6 +785,8 @@ export function createCatalog({ provider, sources }) {
             items: (result.items || []).map((item) => ({ ...item, source: source.id, sourceName: source.name })),
             hasMore: Boolean(result.hasMore),
             fallback: Boolean(result.fallback),
+            fallbackReason: result.fallbackReason || "",
+            note: result.note || "",
             poolSize: result.poolSize || 0,
           };
         } catch (error) {
@@ -625,7 +811,8 @@ export function createCatalog({ provider, sources }) {
       q: keyword,
       page: pageNo,
       items,
-      hasMore: groups.some((group) => group.hasMore),
+      // 聚合整体还有下一页 = 至少一组还有，且没到翻页硬上限。
+      hasMore: pageNo < MAX_PAGE && groups.some((group) => group.hasMore),
       groups: groups.map((group) => ({
         source: group.source,
         name: group.name,
@@ -633,6 +820,8 @@ export function createCatalog({ provider, sources }) {
         ms: group.ms,
         hasMore: group.hasMore,
         fallback: group.fallback,
+        fallbackReason: group.fallbackReason || "",
+        note: group.note || "",
         poolSize: group.poolSize,
         error: group.error,
       })),
@@ -749,7 +938,8 @@ export function createCatalog({ provider, sources }) {
           rank: row.rank,
         };
       }).filter(Boolean),
-      hasMore: start + slice.length < pool.length,
+      // 池子按真实长度判定，并同样受 MAX_PAGE 硬上限约束（空页/末页都为 false）。
+      hasMore: pageNo < MAX_PAGE && start + slice.length < pool.length,
       total: pool.length,
       stale,
     };

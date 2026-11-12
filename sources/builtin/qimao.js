@@ -217,10 +217,16 @@ function pageState(key) {
   return state;
 }
 
-function packPage(state, page, list, hasMore) {
-  // 有下一页游标、且本页确实有数据、且没到页数上限，才算还有更多
-  const more = Boolean(hasMore) && list.length > 0 && page < MAX_PAGE;
-  const result = { page: page, pagecount: more ? page + 1 : page, hasMore: more, list: list };
+function packPage(state, page, list, hasMore, pageCount) {
+  // 有下一页游标、且本页确实有数据、且没到页数上限，才算还有更多。
+  // hasMore=undefined 表示「源端不知道」：只给出非空提示，最终是否有下一页交给 catalog 的
+  // 「满页 + 新 id」规则判定（搜索结果没有游标也没有总页数，只能这样）。
+  const more = hasMore === undefined
+    ? (list.length > 0 && page < MAX_PAGE)
+    : (Boolean(hasMore) && list.length > 0 && page < MAX_PAGE);
+  // pagecount 只回源端给的真实总页数（0 表示源端不提供，交给 catalog 按「满页 + 新 id」判定）。
+  // 以前用 page+1 伪造，导致 catalog 认定「永远还有下一页」。
+  const result = { page: page, pagecount: Number(pageCount) || 0, hasMore: more, list: list };
   state.pages.set(page, result);
   state.updated = Date.now();
   return result;
@@ -285,7 +291,7 @@ async function category(tid, page, filter, extend) {
     const data = response.data || {};
     state.cursor = text(data.next_id);
     const list = mapList(data.list);
-    return packPage(state, current, list, state.cursor !== "");
+    return packPage(state, current, list, state.cursor !== "", 0);
   } catch (err) {
     // 与官方一致：后续页失败时降级成「没有下一页」，不把错误抛回首页
     if (current > 1) {
@@ -350,7 +356,7 @@ async function search(keyword, quick, page) {
     const response = await requestJson(url);
     const list = mapList((response.data || {}).list);
     // 搜索接口不给游标：本页有数据就当还有下一页，直到拉回空页为止
-    return packPage(state, current, list, current < MAX_PAGE);
+    return packPage(state, current, list, undefined, 0);
   } catch (err) {
     if (current > 1) {
       return { page: current, pagecount: current, hasMore: false, list: [] };
