@@ -13,6 +13,8 @@
     // A4：起播/切档时间 + 同档重试一次性标志（10s 内解码失败先原样重载一次）
     switchAt: 0, switchRetried: false, switching: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
+    // 自动连播：开关（本地持久化）、假结束恢复一次性标志、最后稳定播放位置
+    autoNext: true, falseEndRecovered: false, lastPos: 0,
     fallback: null, fallbackLoading: false, health: null,
     iosFs: false, // iOS Safari 原生视频全屏中（iPhone 不支持元素级全屏，只能靠 webkit 事件记录）
     user: null, favs: [], follows: [],
@@ -1263,12 +1265,15 @@
     }
   }
 
-  function playEpisode(lineIdx, epIdx, startAt, auto) {
+  // recovering=true 表示这是假结束后的自动恢复：保留「每集只恢复一次」标志，防止恢复→再假结束的死循环。
+  function playEpisode(lineIdx, epIdx, startAt, auto, recovering) {
     var autoNext = auto === true;
     var d = state.detail; if (!d) return;
     var line = d.lines[lineIdx]; if (!line) return;
     var ep = line.episodes[epIdx]; if (!ep) return;
     state.autoNextLatch = false;
+    if (!recovering) state.falseEndRecovered = false; // 换集/手动重播才重置；自动恢复保留一次性标志
+    state.lastPos = Math.max(0, Math.floor(startAt || 0));
     state.line = lineIdx; state.epIdx = epIdx;
     markActiveEp(lineIdx, epIdx);
     $('pTitle').textContent = (d.title || '') + ' · ' + (ep.name || '');
@@ -1880,15 +1885,90 @@
     return (state.epIdx || 0) + 1 < line.episodes.length;
   }
 
+  // ---- 自动连播开关（语义对齐糖葫芦 playback_preferences.autoAdvance：默认开、可关、本地持久化）----
+  // 存储键沿用项目既有 hg_ 前缀约定：hg_autonext = '1' | '0'
+  var AUTO_NEXT_KEY = 'hg_autonext';
+  function loadAutoNext() {
+    var raw = '';
+    try { raw = localStorage.getItem(AUTO_NEXT_KEY) || ''; } catch (e) { /* 隐私模式 / localStorage 被禁用 */ }
+    state.autoNext = raw !== '0'; // 只认显式 '0' 为关闭；缺省与脏值一律回到默认开
+    applyAutoNext();
+    return state.autoNext;
+  }
+  function writeAutoNext() { try { localStorage.setItem(AUTO_NEXT_KEY, state.autoNext ? '1' : '0'); } catch (e) {} }
+  function applyAutoNext() {
+    var btn = $('btnAutoNext');
+    if (!btn) return;
+    btn.textContent = state.autoNext ? '连播 开' : '连播 关';
+    btn.classList.toggle('on', state.autoNext);
+    btn.setAttribute('aria-pressed', state.autoNext ? 'true' : 'false');
+  }
+  function toggleAutoNext() {
+    state.autoNext = !state.autoNext;
+    writeAutoNext();
+    applyAutoNext();
+    state.autoNextLatch = false;
+    if (state.autoNext) {
+      toast('自动连播已开启');
+      // 开关是在片尾停住后才打开的：补一次连播（末集仍然不切）
+      var v = $('video');
+      if (v && v.ended && canAutoNext() && autoNextAllowed()) scheduleAutoNext();
+    } else {
+      toast('自动连播已关闭，播完停在当前集');
+    }
+  }
+
+  // 片尾判定：时长有效且已播到片尾 2 秒内才算「真结束」。
+  // 取流中断 / 解码失败 / HLS 断流时浏览器也可能抛 ended 或停表；若直接切集，等于把没播完的一集吞掉。
+  function realEnd(v) {
+    var dur = v.duration;
+    if (!isFinite(dur) || dur <= 0) return false;
+    return (v.currentTime || 0) >= dur - 2;
+  }
+
+  // 自动切集的三重守卫（对齐糖葫芦 _autoAdvance && _foreground && !_panelOpen）：
+  // ① 连播开关；② 页面在前台；③ 没有弹层挡着（本项目没有独立剧集面板，取「任一遮罩弹层打开」为等价条件）。
+  function autoNextAllowed() {
+    if (!state.autoNext) return false;
+    if ($('player').classList.contains('hidden')) return false;
+    if (document.visibilityState && document.visibilityState !== 'visible') return false;
+    var modals = document.querySelectorAll('.modal:not(.hidden)');
+    if (modals && modals.length) return false;
+    return true;
+  }
+
+  // 末集播完 / 开关关闭 / 后台：只暂停 + 落盘，绝不跨季（季切换是手动功能，这里不引入任何季级跳转）。
+  function finishEpisode(v) {
+    state.autoNextLatch = true;
+    try { v.pause(); } catch (e) {} // 无条件暂停：起播 promise 尚未 resolve 时 v.paused 可能还是 true，按状态判断会漏停
+    var dur = Math.floor(v.duration || 0);
+    if (state.histKey && dur > 0) histUpdate(dur, dur, true);
+    else saveProgress(v);
+  }
+
+  // 假结束：不切集，重取当前集并从最后稳定位置续播；每集只恢复一次，避免「恢复→又假结束」死循环。
+  function recoverFromFalseEnd(v) {
+    if (state.falseEndRecovered) return;
+    state.falseEndRecovered = true;
+    var dur = isFinite(v.duration) ? v.duration : 0;
+    var pos = state.lastPos || 0;
+    if (dur > 0 && pos >= dur - 2) pos = Math.max(0, dur - 5);
+    toast('播放中断，正在恢复当前集…');
+    playEpisode(state.line, state.epIdx, pos, true, true);
+  }
+
   // 片尾自动连播：ended 事件在某些浏览器/HLS 场景不稳定，timeupdate 临近片尾作为兜底。
   function scheduleAutoNext() {
     if (state.autoNextLatch) return;
-    if ($('player').classList.contains('hidden')) return;
-    if (!canAutoNext()) return;
+    var v = $('video');
+    if (!v) return;
+    if (!autoNextAllowed()) return;           // 开关关闭 / 后台 / 弹层打开：不切集
+    if (!canAutoNext()) { finishEpisode(v); return; } // 末集：只暂停 + 落盘
     var key = String(state.line) + ':' + String(state.epIdx);
     state.autoNextLatch = true;
     setTimeout(function () {
-      if ($('player').classList.contains('hidden') || String(state.line) + ':' + String(state.epIdx) !== key) {
+      if ($('player').classList.contains('hidden') || !autoNextAllowed() ||
+          String(state.line) + ':' + String(state.epIdx) !== key) {
         state.autoNextLatch = false;
         return;
       }
@@ -2009,6 +2089,8 @@
       armStallCheck(v, 400);
     });
     v.addEventListener('timeupdate', function () {
+      // 记录最后稳定位置：假结束时用它续播，避免从头再来
+      if (!v.seeking && v.currentTime > 0) state.lastPos = v.currentTime;
       if (!state.histKey) return;
       var now = Date.now();
       if (now - state.lastSave < 5000) return;
@@ -2023,6 +2105,8 @@
     });
     v.addEventListener('pause', function () { saveProgress(v); });
     v.addEventListener('ended', function () {
+      // 假结束（时长为 0 或离片尾还差得远）说明是取流/解码中断，重播当前集而不是切下一集
+      if (!realEnd(v)) { recoverFromFalseEnd(v); return; }
       var dur = Math.floor(v.duration || 0);
       if (state.histKey) histUpdate(dur, dur, true);
       scheduleAutoNext();
@@ -2559,6 +2643,7 @@
   // 绑在它上面会把刚弹出的错误横幅立刻收起来（黑屏却没有任何提示）。
   $('video').addEventListener('playing', hidePlayerError);
   $('btnNext').addEventListener('click', nextEpisode);
+  $('btnAutoNext').addEventListener('click', toggleAutoNext);
   // ---- 顶栏二级菜单（账号 / 历史 / 源）----
   // 顶栏只保留三个分组标题，具体功能都在下拉面板里；同时只展开一个。
   function closeMenus(except) {
@@ -2650,6 +2735,7 @@
   window.__hg = {
     state: state, openPlayer: openPlayer, cycleQuality: cycleQuality,
     cycleRate: cycleRate, toggleFullscreen: toggleFullscreen, histLoad: histLoad,
+    toggleAutoNext: toggleAutoNext, autoNextAllowed: autoNextAllowed, realEnd: realEnd,
     loadRecommend: loadRecommend, loadForYou: loadForYou, loadMore: loadMore, maybeAutoMore: maybeAutoMore,
     openAuth: openAuth, logout: logout, refreshMe: refreshMe, checkUpdates: checkUpdates,
     loadFavs: loadFavs, loadFollows: loadFollows, toggleFav: toggleFav, toggleFollow: toggleFollow,
@@ -2701,7 +2787,7 @@
   // P2(#4)：启动即探测 HEVC 解码能力，清晰度菜单才能给出「HEVC·本机不支持」标注
   probeHevcCap();
   initTheme();
-  loadRate(); applyRate(); syncFullBtn(); renderAccount(); loadVersion(); loadHealth();
+  loadRate(); applyRate(); loadAutoNext(); syncFullBtn(); renderAccount(); loadVersion(); loadHealth();
   setInterval(loadHealth, 60 * 1000);
   // PWA：注册 service worker（仅 http(s) 下有效）
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
