@@ -81,6 +81,7 @@ const EXPECTED_EXPORTS = [
   "categoryData",
   "itemToCard",
   "appSearchPage",
+  "APP_DEVICE",
   "websiteSearch",
   "routerData",
   "resolveStream",

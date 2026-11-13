@@ -81,13 +81,13 @@ function buildQuery(values) {
     .join("&");
 }
 
-function dataDir() {
+export function dataDir() {
   const fromEnv = process.env.DATA_DIR;
   if (fromEnv && fromEnv.trim()) return path.resolve(fromEnv);
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 }
 
-export function createOfficial({ register, deriveContentKey } = {}) {
+export function createOfficial({ register, deriveContentKey, devices } = {}) {
   if (typeof register !== "function" || typeof deriveContentKey !== "function")
     throw new Error("createOfficial 需要 register / deriveContentKey");
 
@@ -95,16 +95,20 @@ export function createOfficial({ register, deriveContentKey } = {}) {
   const inflight = new Map(); // epId -> Promise（同一集并发请求只打一次上游）
   // 设备身份（B3）：持久化 + 校验 + 节流轮换都交给 device.mjs，
   // 这里只负责「什么时候用旧身份、什么时候必须换」。
-  const devices = createDeviceStore({
-    file: path.join(dataDir(), "device.json"),
-    envId: process.env.HONGGUO_DEVICE_ID,
-    envIid: process.env.HONGGUO_INSTALL_ID,
-    register,
-  });
+  // 身份仓库允许由调用方注入：搜索通道与播放通道必须共用同一份设备身份，
+  // 否则两个通道各自注册、各自轮换，等于凭空多一倍设备 churn（更容易撞风控）。
+  const store =
+    devices ||
+    createDeviceStore({
+      file: path.join(dataDir(), "device.json"),
+      envId: process.env.HONGGUO_DEVICE_ID,
+      envIid: process.env.HONGGUO_INSTALL_ID,
+      register,
+    });
 
   const stats = { requests: 0, ok: 0, empty: 0, failed: 0, rotated: 0, lastError: "", lastErrorAt: 0, registered: 0, invalidated: 0 };
   // 设备身份现状随 /api/metrics 一起暴露（source / 轮换次数 / 被节流次数），只含脱敏设备号。
-  Object.defineProperty(stats, "device", { get: () => devices.stats(), enumerable: true });
+  Object.defineProperty(stats, "device", { get: () => store.stats(), enumerable: true });
 
   function markError(error) {
     stats.failed += 1;
@@ -114,9 +118,9 @@ export function createOfficial({ register, deriveContentKey } = {}) {
 
   async function getIdentity(fresh = false) {
     const identity = fresh
-      ? await devices.refresh("fresh")
-      : await devices.get({ maxAgeMs: DEVICE_TTL });
-    if (identity.source !== "env") stats.registered = devices.stats().registers;
+      ? await store.refresh("fresh")
+      : await store.get({ maxAgeMs: DEVICE_TTL });
+    if (identity.source !== "env") stats.registered = store.stats().registers;
     return identity;
   }
 
@@ -172,7 +176,7 @@ export function createOfficial({ register, deriveContentKey } = {}) {
       stats.empty += 1;
       // 200 空正文是「这份身份被风控」的典型信号：换一份身份往往立刻恢复。
       // rotate 内部有 60 秒节流，所以连续失败不会把上游打成「一直在注册」。
-      const rotation = await devices.rotate("empty-body");
+      const rotation = await store.rotate("empty-body");
       if (rotation.rotated) stats.rotated += 1;
       throw new Error(
         "model 空响应（签名或设备身份被风控）" + (rotation.rotated ? "，已换设备身份" : "")

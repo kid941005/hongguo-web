@@ -1,10 +1,12 @@
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import axios from "axios";
 import { fail } from "./errors.mjs";
-import { createOfficial } from "./official.mjs";
+import { createOfficial, dataDir } from "./official.mjs";
+import { createDeviceStore } from "./device.mjs";
 import {
   acquire,
   breakerSeconds,
@@ -28,6 +30,7 @@ const VENDOR_EXPORTS = [
   "categoryData",
   "itemToCard",
   "appSearchPage",
+  "APP_DEVICE",
   "websiteSearch",
   "routerData",
   "resolveStream",
@@ -95,10 +98,48 @@ const api = loadVendor();
 // 自测（server/selftest.mjs）直接复用这一份已加载的 vendor 上下文，不重复起 vm。
 export const vendor = api;
 // 官方播放模型（多档 HEVC）：设备身份注册与内容密钥派生都复用 vendor 里已验证的实现。
+const devices = createDeviceStore({
+  file: path.join(dataDir(), "device.json"),
+  envId: process.env.HONGGUO_DEVICE_ID,
+  envIid: process.env.HONGGUO_INSTALL_ID,
+  register: () => api.registerPlaybackDevice(),
+});
+
 const official = createOfficial({
+  devices,
   register: () => api.registerPlaybackDevice(),
   deriveContentKey: (value) => api.deriveContentKey(value),
 });
+// ---- App 签名通道的设备身份（风控绕行） ----
+// 上游网关对「签名请求」的风控是静默的：设备身份被判定为批量/公开身份时，
+// 直接回 HTTP 200 + 0 字节正文（既不是 4xx，也没有业务错误码），
+// 于是 appSearchPage 只能报 "App search failed: 200"。
+// 公开 GPL 源里写死的 device_id/iid 早已人人可用、被批量拉黑，
+// 必须向 device_register 领一对新身份；同一身份用久了也会失效，故设 TTL + 空正文时换新。
+// 身份仓库与播放通道共用同一个 store，轮换节流、持久化、env 钉死都由 device.mjs 负责。
+const APP_IDENTITY_MAX_AGE = 6 * 60 * 60 * 1000;
+const APP_EMPTY_BODY = /App search failed: 200\b/;
+
+// vendor 的 appSearchParams 每次调用都会展开 APP_DEVICE，所以每次搜索前把身份写进去。
+function useAppIdentity(identity) {
+  api.APP_DEVICE.device_id = String(identity.device_id);
+  api.APP_DEVICE.iid = String(identity.iid);
+}
+
+async function appSearch(keyword, page) {
+  useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+  try {
+    return await api.appSearchPage(keyword, 11, page, 20);
+  } catch (error) {
+    if (!APP_EMPTY_BODY.test(String(error && error.message))) throw error;
+    // 空正文 = 身份被风控：换一对身份重试一次，仍空就把错误抛给上层走别的通道。
+    const result = await devices.rotate("search-risk");
+    if (result.rotated && result.identity) useAppIdentity(result.identity);
+    else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+    return api.appSearchPage(keyword, 11, page, 20);
+  }
+}
+
 const SITE = "https://hongguoduanju.com";
 const card = (row) => ({
   id: String(row.url),
@@ -232,20 +273,23 @@ export const provider = {
     let webError = null;
     try {
       const result = await api.websiteSearch(keyword, page);
-      // 200 + searchList 是权威结果（空列表=确实没有），直接返回，不再让别的通道给出不一致答案
-      return {
-        items: cards(result.list),
-        page: result.page || page,
-        pageCount: Number(result.totalPages) || 0,
-        hasMore: Boolean(result.hasMore),
-        total: result.total || 0,
-        channel: "web",
-      };
+      // 200 + searchList 是权威结果：非空就直接返回，不让别的通道给出不一致答案。
+      // 但「官网索引为空」只代表官网没收录——App 目录比官网大，
+      // 所以空结果再问一次 App 通道（这正是签名通道存在的价值）。
+      if (result.list.length)
+        return {
+          items: cards(result.list),
+          page: result.page || page,
+          pageCount: Number(result.totalPages) || 0,
+          hasMore: Boolean(result.hasMore),
+          total: result.total || 0,
+          channel: "web",
+        };
     } catch (error) {
       webError = error;
     }
     try {
-      const result = await api.appSearchPage(keyword, 11, page, 20);
+      const result = await appSearch(keyword, page);
       if (result.list.length)
         return { items: cards(result.list), page, channel: "app" };
     } catch {
