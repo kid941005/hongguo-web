@@ -24,12 +24,19 @@ import {
 // 依赖只给真正需要的：node:crypto / node:zlib 与一个关掉代理的 axios 实例。
 // 导出只暴露本服务实际调用的成员，新增调用必须先加进 VENDOR_EXPORTS，否则加载即失败。
 const VENDOR_FILE = new URL("./vendor/hongguo.cjs", import.meta.url);
+// 本地补丁：不属于上游源本体，追加到同一 vm 作用域内执行（详见 patch 文件头注释）。
+// 好处是 vendor 源保持与上游逐字节一致，升级上游时只需替换 hongguo.cjs 这一个文件。
+const VENDOR_PATCHES = [
+  new URL("./vendor/hongguo.series.patch.js", import.meta.url),
+  new URL("./vendor/hongguo.cenc.patch.js", import.meta.url),
+];
 
 const VENDOR_EXPORTS = [
   "categoryPage",
   "categoryData",
   "itemToCard",
   "appSearchPage",
+  "appSeriesSeasons",
   "APP_DEVICE",
   "websiteSearch",
   "routerData",
@@ -49,10 +56,12 @@ const VENDOR_EXPORTS = [
   "channelStats",
   "registerPlaybackDevice",
   "deriveContentKey",
+  "cencInspect",
 ];
 
 export function loadVendor() {
   const source = fs.readFileSync(VENDOR_FILE, "utf8");
+  const patchSource = VENDOR_PATCHES.map((file) => fs.readFileSync(file, "utf8")).join("\n");
   const context = vm.createContext({
     require: (name) => {
       if (name === "node:crypto") return crypto;
@@ -74,7 +83,7 @@ export function loadVendor() {
     }),
   });
   vm.runInContext(
-    source + "\nthis.api = {" + VENDOR_EXPORTS.join(", ") + "};",
+    source + "\n" + patchSource + "\nthis.api = {" + VENDOR_EXPORTS.join(", ") + "};",
     context,
     { timeout: 5000 }
   );
@@ -88,6 +97,7 @@ export function loadVendor() {
       file: "server/vendor/hongguo.cjs",
       bytes: Buffer.byteLength(source),
       sha256_12: crypto.createHash("sha256").update(source).digest("hex").slice(0, 12),
+      patch_bytes: Buffer.byteLength(patchSource),
       exports: VENDOR_EXPORTS.length,
     })
   );
@@ -97,6 +107,15 @@ export function loadVendor() {
 const api = loadVendor();
 // 自测（server/selftest.mjs）直接复用这一份已加载的 vendor 上下文，不重复起 vm。
 export const vendor = api;
+
+// CENC 能力守卫（provider 层错误码映射）：把 cencInspect 的“不支持”结论翻译成本服务的业务码
+// CENC_UNSUPPORTED（见 errors.mjs，502）。供官方通道与自测复用；文案与 vendor 补丁保持一致。
+const CENC_UNSUPPORTED_MESSAGE = "该剧加密格式暂不支持，请切换其他源";
+export function assertCencSupported(buffer) {
+  const info = api.cencInspect(buffer);
+  if (!info.supported) throw fail("CENC_UNSUPPORTED", CENC_UNSUPPORTED_MESSAGE);
+  return info;
+}
 // 官方播放模型（多档 HEVC）：设备身份注册与内容密钥派生都复用 vendor 里已验证的实现。
 const devices = createDeviceStore({
   file: path.join(dataDir(), "device.json"),
@@ -138,6 +157,53 @@ async function appSearch(keyword, page) {
     else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
     return api.appSearchPage(keyword, 11, page, 20);
   }
+}
+
+
+// ---- 官方季表：多季剧的季列表（seriesSeasons 通道） ----
+// 与 App 搜索共用同一设备身份；身份被风控（200 空正文）时同样换身份重试一次。
+// 上游 plan/v 一次可返回整部剧的全部季（实测 1–6 季，含「待上线」季），
+// 故这里加重结果缓存，避免每次打开详情都打一次签名接口。
+const SERIES_TTL = 10 * 60 * 1000;
+// 单季剧/非系列作品会被上游明确拒绝（SERIES_REJECTED），这类结论短期不会变；
+// 缓存一个较短 TTL 的空结果，避免每次打开详情都白打一次签名接口（占多数剧集）。
+const SERIES_NEGATIVE_TTL = 5 * 60 * 1000;
+const SERIES_NEGATIVE_CODES = /SERIES_REJECTED|INVALID_SERIES_ID|INVALID_SERIES_CURSOR/;
+const seriesCache = new Map();
+const seriesPending = new Map();
+
+async function seriesSeasons(rawId) {
+  const id = String(rawId == null ? "" : rawId).replace(/^hongguo:/, "");
+  if (!/^[1-9]\d{9,29}$/.test(id)) throw fail("BAD_INPUT", "剧集 id 无效");
+  const cached = seriesCache.get(id);
+  if (cached && Date.now() - cached.at < (cached.ttl || SERIES_TTL)) return cached.value;
+  if (seriesPending.has(id)) return seriesPending.get(id);
+  const task = (async () => {
+    useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+    let list;
+    try {
+      ({ list } = await api.appSeriesSeasons(id));
+    } catch (error) {
+      const message = String((error && error.message) || "");
+      if (!APP_EMPTY_BODY.test(message)) {
+        if (SERIES_NEGATIVE_CODES.test(message)) {
+          seriesCache.set(id, { at: Date.now(), value: [], ttl: SERIES_NEGATIVE_TTL });
+          while (seriesCache.size > 200) seriesCache.delete(seriesCache.keys().next().value);
+        }
+        throw error;
+      }
+      const result = await devices.rotate("series-risk");
+      if (result.rotated && result.identity) useAppIdentity(result.identity);
+      else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+      ({ list } = await api.appSeriesSeasons(id));
+    }
+    const value = Array.isArray(list) ? list : [];
+    seriesCache.set(id, { at: Date.now(), value });
+    while (seriesCache.size > 200) seriesCache.delete(seriesCache.keys().next().value);
+    return value;
+  })().finally(() => seriesPending.delete(id));
+  seriesPending.set(id, task);
+  return task;
 }
 
 const SITE = "https://hongguoduanju.com";
@@ -311,6 +377,9 @@ export const provider = {
       `红果搜索暂不可用：${(webError && webError.message) || "所有通道均失败"}`
     );
   },
+  // 官方季表（多季选择）：失败由调用方按「无季信息」处理，不影响详情主流程。
+  seriesSeasons,
+
   async detail(id) {
     const data = await api.routerData(`${SITE}/detail?series_id=${id}`);
     const series = data?.loaderData?.detail_page?.seriesDetail;
@@ -377,6 +446,9 @@ export const provider = {
               ),
           };
         } catch (error) {
+          // 加密方案不支持是“确定的格式结论”，不是上游抖动：直接透出 CENC_UNSUPPORTED（502），
+          // 不要静默回落成 360P / 花屏，让用户看到明确文案。
+          if (error && error.code === "CENC_UNSUPPORTED") throw error;
           // 高清通道失败只降级（360P 兜底通常仍可用），但要按同一套判据喂官方通道熔断：
           // 被风控时连续失败到阈值就拉闸，之后一段时间直接走 360P，不再白等模型超时。
           const message = String((error && error.message) || error).slice(0, 300);
@@ -497,6 +569,8 @@ export const provider = {
       cleared[name] = cache.size;
       cache.clear();
     }
+    cleared.series = seriesCache.size;
+    seriesCache.clear();
     cleared.official = typeof official.clearCache === "function" ? official.clearCache() : 0;
     cleared.recommend = recommendPool ? recommendPool.length : 0;
     recommendPool = null;

@@ -1195,6 +1195,7 @@
     setView('detail');
     $('dTitle').textContent = '加载中…'; $('dMeta').textContent = ''; $('dDesc').textContent = ''; $('dTags').textContent = '';
     $('dCover').src = PLACEHOLDER; $('dEps').textContent = ''; $('dLines').textContent = '';
+    $('dSeasons').textContent = ''; $('dSeasons').classList.add('hidden');
     api('/api/detail', { source: state.viewSource, id: id }).then(function (d) {
       if (!isCurrent(seq)) return;
       state.detail = d; state.line = 0;
@@ -1209,7 +1210,7 @@
         if (cover && $('dCover').src.indexOf('/api/media') === -1) $('dCover').src = authUrl('/api/media?u=' + encodeURIComponent(cover));
         else $('dCover').src = PLACEHOLDER;
       };
-      renderLines(d); renderEps(d, 0);
+      renderSeasons(d); renderLines(d); renderEps(d, 0);
       updateResumeBar(d); updateDetailActions();
       var pr = state.pendingResume; state.pendingResume = null;
       if (pr && pr.id === d.id) playEpisode(pr.lineIdx || 0, pr.epIdx || 0, pr.pos || 0);
@@ -1222,6 +1223,38 @@
       $('dTitle').textContent = '打开失败';
       showError(e);
     });
+  }
+
+  // 季选择器：只有一季时不显示（老片/单季剧不引入多余 UI）。
+  // 季在上游是不共享 id 的独立作品，所以切季 = 换 id 重新拉详情；
+  // openDetail 已有 nextReq/isCurrent 防错播，历史键 source|id 让每季进度天然隔离。
+  function renderSeasons(d) {
+    var box = $('dSeasons'); if (!box) return;
+    box.textContent = '';
+    var list = Array.isArray(d.seasons) ? d.seasons : [];
+    if (list.length <= 1) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    var label = document.createElement('span');
+    label.className = 'seasons-label';
+    label.textContent = '季';
+    box.appendChild(label);
+    list.forEach(function (s) {
+      var b = document.createElement('button');
+      var suffix = s.episodes ? '（' + s.episodes + '）' : (s.status ? '（' + s.status + '）' : '');
+      b.className = 'chip season' + (s.current ? ' active' : '') + (s.playable ? '' : ' disabled');
+      b.textContent = (s.season ? '第' + s.season + '季' : (s.title || '未命名季')) + suffix;
+      b.title = (s.title || '') + (s.remarks ? ' · ' + s.remarks : '') + (s.status ? ' · ' + s.status : '');
+      if (s.current || !s.playable) b.disabled = true;
+      else b.addEventListener('click', function () { switchSeason(s.id, s.season); });
+      box.appendChild(b);
+    });
+  }
+
+  function switchSeason(id, season) {
+    if (!id) return;
+    if (state.detail && String(state.detail.id) === String(id)) return;
+    toast('正在切换到第 ' + (season || '') + '季…');
+    openDetail(String(id), state.viewSource);
   }
 
   function renderLines(d) {

@@ -572,12 +572,46 @@ export function createCatalog({ provider, sources }) {
     );
   }
 
+  // 季表查询：多季剧在上游是多个独立作品 id，靠官方季表通道聚合成季列表。
+  // 任何失败都只记日志并返回空数组——季选择器是增强项，绝不能拖垮详情主流程。
+  async function loadSeasons(id) {
+    if (typeof provider.seriesSeasons !== "function") return [];
+    try {
+      const rows = await withTimeout(provider.seriesSeasons(id), 4000, "季表查询超时");
+      return (Array.isArray(rows) ? rows : [])
+        .map((row) => ({
+          id: String(row.vod_id || row.id || ""),
+          title: String(row.vod_name || row.title || ""),
+          season: Number(row.season) || 0,
+          episodes: Number(row.vod_episodes) || 0,
+          remarks: row.vod_remarks || "",
+          cover: row.vod_pic || "",
+          playable: row.playable !== false,
+          status: row.status || "",
+          current: String(row.vod_id || row.id || "") === String(id),
+        }))
+        .filter((row) => row.id && row.season > 0);
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: "detail_seasons_failed",
+          id: String(id),
+          message: String((error && error.message) || error).slice(0, 200),
+        })
+      );
+      return [];
+    }
+  }
+
   async function detail(sourceId, id) {
     const entry = entryOf(sourceId);
     if (entry.type === "builtin") {
       // 内置源的 id 是纯数字分集/剧 id；不校验就把它拼进上游请求，
       // 上游对 "__nope__" 这类值回 500，最终变成 502 + axios 英文（review D1/S3）。
       if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
+      // 季表与详情并行拉取（季表走独立签名接口，串行会让详情多等 200–400ms）；
+      // 内部吞掉所有错误并返回空数组，所以详情失败时也不会留下未处理的 rejection。
+      const seasonsTask = loadSeasons(String(id));
       let data;
       try {
         data = await withTimeout(provider.detail(String(id)), 30000, "详情加载超时");
@@ -592,6 +626,7 @@ export function createCatalog({ provider, sources }) {
         id: String(ep.id),
         name: ep.title || "第 " + (index + 1) + " 集",
       }));
+      const seasons = await seasonsTask;
       // 用户看详情页时顺手预热第一集的官方清晰度（不阻塞详情返回）：
       // 点播放时 /api/play 直接命中缓存，起播少等 1–2 秒，也不会因超时误判「没有高清档」。
       if (episodes.length && typeof provider.quality === "function") {
@@ -607,6 +642,7 @@ export function createCatalog({ provider, sources }) {
         tags: normTags(data.tags),
         lines: episodes.length ? [{ flag: "hg", name: "红果（服务端解密）", episodes }] : [],
         episodes,
+        seasons,
       };
     }
 

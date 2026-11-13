@@ -14,7 +14,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { vendor } from "./provider.mjs";
+import { provider, vendor, assertCencSupported } from "./provider.mjs";
 import { splitPlayUrl, classifyUrl } from "./catalog.mjs";
 import { probeMp4Head } from "./mp4.mjs";
 import {
@@ -81,6 +81,7 @@ const EXPECTED_EXPORTS = [
   "categoryData",
   "itemToCard",
   "appSearchPage",
+  "appSeriesSeasons",
   "APP_DEVICE",
   "websiteSearch",
   "routerData",
@@ -100,6 +101,7 @@ const EXPECTED_EXPORTS = [
   "channelStats",
   "registerPlaybackDevice",
   "deriveContentKey",
+  "cencInspect",
 ];
 eq(Object.keys(vendor).length, EXPECTED_EXPORTS.length, "导出数量等于白名单长度");
 eq(Object.keys(vendor).sort().join(","), EXPECTED_EXPORTS.slice().sort().join(","), "导出名与白名单一致");
@@ -109,6 +111,89 @@ eq(typeof vendor.remoteRange, "function", "remoteRange 是函数");
 eq(typeof vendor.prepareHeader, "function", "prepareHeader 是函数");
 eq(typeof vendor.registerPlaybackDevice, "function", "registerPlaybackDevice 是函数");
 ok(Array.isArray(vendor.CATEGORIES) && vendor.CATEGORIES.length > 0, "CATEGORIES 是非空数组");
+
+// ------------------------------------------------------------ 官方季表（多季）
+
+section("官方季表（seriesSeasons）");
+
+ok(typeof vendor.appSeriesSeasons === "function", "本地补丁已暴露 appSeriesSeasons");
+let seriesPatchErr = null;
+try {
+  await vendor.appSeriesSeasons("abc");
+} catch (error) {
+  seriesPatchErr = error;
+}
+ok(
+  !!seriesPatchErr && /INVALID_SERIES_ID/.test(String(seriesPatchErr.message)),
+  "补丁拒绝非法剧 id（不联网）",
+  seriesPatchErr && String(seriesPatchErr.message)
+);
+let seriesProviderErr = null;
+try {
+  await provider.seriesSeasons("abc");
+} catch (error) {
+  seriesProviderErr = error;
+}
+ok(
+  !!seriesProviderErr && seriesProviderErr.code === "BAD_INPUT",
+  "provider.seriesSeasons 非法 id 归一成 BAD_INPUT",
+  seriesProviderErr && seriesProviderErr.code
+);
+
+// -------------------------------------------- CENC 能力守卫（快速失败，防花屏）
+
+section("CENC 能力守卫（cencInspect / CENC_UNSUPPORTED）");
+
+// 构造一个最小的加密 MP4 头（ftyp+moov/trak/mdia/minf/stbl），用于离线校验 cencInspect。
+function cencBox(type, ...payloads) {
+  const body = Buffer.concat(payloads.map((p) => Buffer.from(p)));
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(8 + body.length, 0);
+  head.write(type, 4, "ascii");
+  return Buffer.concat([head, body]);
+}
+function cencFullBox(type, flags, ...payloads) {
+  const f = Buffer.alloc(4);
+  f.writeUInt32BE(flags >>> 0, 0);
+  return cencBox(type, f, ...payloads);
+}
+function cencU32(n) { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0, 0); return b; }
+function buildCbcsHeader() {
+  const ftyp = cencBox("ftyp", Buffer.from("isom", "ascii"), cencU32(0));
+  const schm = cencFullBox("schm", 0, Buffer.from("cbcs", "ascii"), cencU32(0x00010000));
+  const tenc = cencFullBox("tenc", 0, Buffer.concat([Buffer.from([0, 0, 1, 16]), Buffer.alloc(16)]));
+  const sinf = cencBox("sinf", schm, cencBox("schi", tenc));
+  const entry = cencBox("encv", Buffer.alloc(78), sinf);
+  const stsd = cencFullBox("stsd", 0, cencU32(1), entry);
+  const saiz = cencFullBox("saiz", 0, Buffer.from([8]), cencU32(1));
+  const saio = cencFullBox("saio", 0, cencU32(1), cencU32(0));
+  const stbl = cencBox("stbl", stsd, saiz, saio);
+  const minf = cencBox("minf", stbl);
+  const mdia = cencBox("mdia", minf);
+  const trak = cencBox("trak", mdia);
+  return Buffer.concat([ftyp, cencBox("moov", trak)]);
+}
+
+ok(typeof vendor.cencInspect === "function", "本地补丁已暴露 cencInspect");
+
+let cencGarbageErr = null;
+try { vendor.cencInspect(Buffer.from("this-is-not-an-mp4-header")); } catch (error) { cencGarbageErr = error; }
+ok(
+  !!cencGarbageErr && /CENC_INSPECT_INVALID/.test(String(cencGarbageErr.message)),
+  "cencInspect 拒绝非法输入（非 MP4）",
+  cencGarbageErr && String(cencGarbageErr.message)
+);
+
+let cencBadErr = null;
+try { assertCencSupported(buildCbcsHeader()); } catch (error) { cencBadErr = error; }
+ok(
+  !!cencBadErr &&
+    cencBadErr.code === "CENC_UNSUPPORTED" &&
+    statusOf(cencBadErr.code) === 502 &&
+    publicMessage(cencBadErr) === "该剧加密格式暂不支持，请切换其他源",
+  "provider.assertCencSupported 把 cbcs 头归一成 CENC_UNSUPPORTED/502 且文案透出",
+  cencBadErr && cencBadErr.code
+);
 
 // ------------------------------------------------------------ 内容密钥派生
 

@@ -27,6 +27,8 @@ const STATUS = {
   NO_URL: 502,
   SOURCE_LOAD: 502,
   SOURCE_CRASH: 502,
+  // 502：上游把加密格式换成本服务不支持的样子（cbcs/cens/16 字节 IV/subsample/分片），快速失败而非花屏。
+  CENC_UNSUPPORTED: 502,
   // 转码这类「整集读进内存」的路径遇到超大文件时的明确业务码，避免抛裸 Error 变成 502 无码。
   SOURCE_OOM: 502,
   TIMEOUT: 504,

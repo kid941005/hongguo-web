@@ -14,7 +14,7 @@
 
 | 分类 | 能力 |
 | --- | --- |
-| 内置红果源 | 服务端签名取址 + CENC 分块解密 + Range 转发；可播档位 1080P（HEVC）与 360P（H.264），不支持 HEVC 的浏览器自动回落 |
+| 内置红果源 | 服务端签名取址 + CENC 分块解密 + Range 转发；可播档位 1080P（HEVC）与 360P（H.264），不支持 HEVC 的浏览器自动回落；系列剧走官方季表通道，详情页可直接切换第 1–N 季 |
 | JS 源（糖葫芦格式） | 单文件 `spider`，独立 worker 线程沙箱运行；网页内导入 / 自检 / 删除 / 自动更新 |
 | 检索 | 首页分类、分类分页、搜索；内置红果搜索双通道（官网索引 / App 签名通道，遇风控自动更换设备身份重试）；**多源聚合搜索**（并发、先回先展示、逐源失败信息） |
 | 发现 | 推荐页（四榜单真实评分合并）、猜你喜欢（协同过滤 + 相似题材 + 热门兜底） |
@@ -22,7 +22,7 @@
 | 界面 | 三档外观主题（深色 / 浅色 / 跟随设备，首帧不闪），顶栏与内容区同宽对齐，移动端安全区适配 |
 | 个人数据 | 账号登录、观看历史 / 续播、收藏、追剧提醒、倍速偏好，跨设备同步 |
 | 运维 | `/health`、`/api/metrics`、`/api/alerts` 通道监控、`/api/cache/clear` 一键清缓存、`/api/*` 访问日志、Webhook 告警 |
-| 质量 | `server/selftest.mjs` 离线自测（130 断言），CI 构建镜像前先跑 |
+| 质量 | `server/selftest.mjs` 离线自测（136 断言），CI 构建镜像前先跑 |
 
 ## 目录
 
@@ -58,7 +58,7 @@ docker compose up -d        # 默认使用 ghcr.io/kid941005/hongguo-web:latest
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.13.0","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.14.0","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败标记 unhealthy。发布后还可以跑六项冒烟（health / 源列表 / 首页 / 猜你喜欢 / 源自检取流 / 播放监控）：
@@ -116,7 +116,7 @@ docker run -d --name hongguo-web \
   hongguo-web
 ```
 
-参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.13.0`。
+参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.14.0`。
 
 ### 1.7 升级、停止与卸载
 
@@ -196,6 +196,7 @@ docker compose down -v                        # 连数据卷一起删（会丢�
 ### 3.2 播放与清晰度
 
 - **选集**：点卡片 → 详情页选集；多线路时先选线路。播放器支持 HLS（m3u8）与 MP4 直链；`flv` 能识别但没有播放器。
+- **多季**：内置红果的系列剧，详情页标题下方出现「季」选择条（`第1季（90）`…，括号是该季集数；当前季高亮不可点，未上线季显示「待上线」）。点其它季即切到该季的详情与选集，观看进度按季独立记录、互不串集。季表取自红果官方季表通道（`seriesSeasons`），查询失败只少一个季条，不影响正常看剧。
 - **分辨率与切档**：控制条常显**当前解码分辨率**徽标（360P/720P/1080P…，取自 `video.videoWidth/Height`）。点「清晰度」查看档位——HLS master 多码率源可在「自动 / 各档」间切换并尽量保持播放位置；单码率 HLS 与 MP4 直链只显示「该源仅此一种清晰度」，不伪造选项。切档时按钮显示「切换中…」、进度保留、地址栏记录档位。
 - **倍速**：0.5×–2×（点 `1.0×` 循环，控制条实时显示当前倍速）；刷新、换集都保持，点开新剧默认 1.0×。未登录记在本机，登录后随账号跨设备同步。
 - **全屏**：按钮 / 双击画面 / `F`。
@@ -332,7 +333,7 @@ var spider = {
 | POST | `/api/for-you` | 猜你喜欢：`{ seeds?: [{source,id,title,cover}], refresh?: bool }`；登录用户用云端历史做种子。返回 `{items, basis:{mode,seeds,coUsers,total,counts}, generatedAt}` |
 | GET | `/api/category?source=&tid=&page=` | 分类列表 |
 | GET | `/api/search?source=&q=&page=` | 搜索；`source=__all`（或 `all=1`）为多源聚合，返回 `{aggregate:true, groups:[{source,name,count,ms,hasMore,error}]}` |
-| GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集） |
+| GET | `/api/detail?source=&id=` | 详情（含标签、线路与剧集；内置红果系列剧额外带 `seasons` 季表） |
 | GET | `/api/play?source=&flag=&id=` | 取播放地址（`{type,url}`；内置红果额外带 `quality:{options:[{key,label,height,codec,url}],note}`） |
 | GET | `/api/play/fallback?source=&id=&index=` | 播放失败时的替代源：按剧名跨源匹配，返回 `{candidates:[{source,name,id,title,episodeCount,targetIndex,episodeName,score}]}`（最多 3 个） |
 | GET | `/api/media?u=&r=&at=` | 媒体透传（支持 Range，`r` 为 Referer）；图片请求（`Accept: image/*` 或图片后缀）上游失败时回内置占位图 **200**，响应头 `x-media-fallback` 标明原因 |
@@ -405,6 +406,7 @@ docker run --rm -v "$PWD":/w -w /w node:22-bookworm-slim sh -c \
 - **需要 webview 嗅探的源**（`parse: 1`）不可用：本服务没有浏览器内核。
 - **同时播放上限**：内置红果解密流默认最多 6 路并发（`MAX_STREAMS` 可调）。同一集同一档位被多人同时点开只取址一次，`/api/metrics` 的 `dedupe.shared` 可看合并次数。
 - **红果内置流的分档**：1080P 是 **HEVC**，360P 是 **H.264**，两者浏览器可解（HEVC 需设备/浏览器支持，Chrome 有 GPU 时可硬解）；官方 360P–720P 中间档是 **H.266/VVC**，任何浏览器都没有解码器，只有服务端装了 7.1+ 的 ffmpeg 才由服务端转成 H.264 提供（菜单里标注「转码」）。转码线路是**边转边发、不可拖动**，CPU 占用约 12× 实时（单核），并发多了会排队；没有 ffmpeg 时这些档不列入菜单。给能解 VVC 的外部播放器直取仍可用 `?q=720p&vvc=1`。官方签名接口再变动时，服务端自动回落官网明文 360P；若连档位信息都取不到，`/api/play` 只降级为「仅 360P 兼容线路」，不会整条播放失败。
+- **红果加密格式**：只支持 CENC（AES-128-CTR）、每样本 8 字节 IV、无 subsample、`moov` 前置的非分片 MP4——这是红果当前唯一在用的组合。上游若改成 `cbcs`/`cens`（AES-CBC 模式）、16 字节 IV、含 subsample 或分片 MP4，播放会直接返回 `CENC_UNSUPPORTED`（「该剧加密格式暂不支持，请切换其他源」），而不是解出花屏。解密前会先解析真实加密头做校验（`server/vendor/hongguo.cenc.patch.js`）。
 - **设备身份会被风控**：红果播放模型接口把「匿名注册的设备」当风控维度，同一份身份被判异常后签名重算多少次都只会拿到 200 空正文。服务端把身份存 `DATA_DIR/device.json` 长期复用，只有真收到空正文才换一份，且同一身份 60 秒内最多换一次。身份来源、注册 / 轮换 / 被节流次数见 `/api/metrics` 的 `official.device`（已脱敏）；`HONGGUO_DEVICE_ID` 钉死时不轮换。
 - **降级换源依赖别家也有同名剧**：替代源按标题相似度在其它源搜索结果里找，红果独播剧、译名差异大的剧通常找不到候选；此时只能换剧或等通道恢复。
 - **账号数据库**：用户、令牌、历史、收藏、追更都存 `DATA_DIR/hongguo.db`（SQLite，WAL 模式）。`DATA_DIR` 必须挂持久卷，否则重建容器会丢账号数据；备份直接拷这个文件即可（建议先停容器）。
