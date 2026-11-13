@@ -18,7 +18,7 @@
 | JS 源（糖葫芦格式） | 单文件 `spider`，独立 worker 线程沙箱运行；网页内导入 / 自检 / 删除 / 自动更新 |
 | 检索 | 首页分类、分类分页、搜索；**多源聚合搜索**（并发、先回先展示、逐源失败信息） |
 | 发现 | 推荐页（四榜单真实评分合并）、猜你喜欢（协同过滤 + 相似题材 + 热门兜底） |
-| 播放 | HLS 多码率切档、当前分辨率徽标、倍速、全屏、下一集预取；播放失败自动找替代源 |
+| 播放 | HLS 多码率切档、当前分辨率徽标、倍速、全屏（手机端铺满、全屏隐藏顶栏只留画面）、下一集预取；播放失败自动找替代源 |
 | 界面 | 三档外观主题（深色 / 浅色 / 跟随设备，首帧不闪），顶栏与内容区同宽对齐，移动端安全区适配 |
 | 个人数据 | 账号登录、观看历史 / 续播、收藏、追剧提醒、倍速偏好，跨设备同步 |
 | 运维 | `/health`、`/api/metrics`、`/api/alerts` 通道监控、`/api/cache/clear` 一键清缓存、`/api/*` 访问日志、Webhook 告警 |
@@ -58,7 +58,7 @@ docker compose up -d        # 默认使用 ghcr.io/kid941005/hongguo-web:latest
 ```bash
 docker compose ps                        # STATUS 里应出现 running (healthy)
 docker compose logs -f                   # 实时日志，Ctrl+C 退出
-curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.12.0","active":"hongguo","sources":7,"accounts":true}
+curl -s http://localhost:8787/health     # {"service":"hongguo-web","ok":true,"version":"0.12.1","active":"hongguo","sources":7,"accounts":true}
 ```
 
 `healthy` 来自 compose 的 healthcheck：每 30 秒请求一次 `/health`，连续 3 次失败标记 unhealthy。发布后还可以跑六项冒烟（health / 源列表 / 首页 / 猜你喜欢 / 源自检取流 / 播放监控）：
@@ -116,7 +116,7 @@ docker run -d --name hongguo-web \
   hongguo-web
 ```
 
-参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.12.0`。
+参数与 [compose.yaml](compose.yaml) 对应（示例只列常用项，未列出的变量取默认值，如源自动更新、播放监控）。直接跑发布镜像时把最后的 `hongguo-web` 换成 `ghcr.io/kid941005/hongguo-web:latest`，想固定版本可写 `:0.12.1`。
 
 ### 1.7 升级、停止与卸载
 

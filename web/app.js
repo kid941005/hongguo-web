@@ -14,6 +14,7 @@
     switchAt: 0, switchRetried: false, switching: false,
     loadingMore: false, autoNextLatch: false, aggregate: false, aggGroups: [],
     fallback: null, fallbackLoading: false, health: null,
+    iosFs: false, // iOS Safari 原生视频全屏中（iPhone 不支持元素级全屏，只能靠 webkit 事件记录）
     user: null, favs: [], follows: [],
     // P1(#2)：列表会话内的「上一页 id 签名」，用于识别源忽略 page 参数、反复返回同一批
     lastPageSig: '', searching: false,
@@ -1610,12 +1611,16 @@
   }
 
   // ---- 全屏 ----
+  // iOS Safari（iPhone）不支持元素级全屏：requestFullscreen 不存在，只能退到 video.webkitEnterFullscreen()。
+  // 那一路 document.fullscreenElement 恒为 null，必须用 webkitbegin/endfullscreen 记到 state.iosFs，
+  // 否则按钮恒显示「全屏」、再点一次也退不出原生全屏。
   function isFullscreen() {
-    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    return !!(document.fullscreenElement || document.webkitFullscreenElement || state.iosFs);
   }
   function toggleFullscreen() {
     var box = document.querySelector('.player-inner') || $('player');
     var v = $('video');
+    if (state.iosFs) { try { v.webkitExitFullscreen(); } catch (e) {} return; }
     if (isFullscreen()) {
       (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
       return;
@@ -1625,7 +1630,7 @@
     } else if (box.webkitRequestFullscreen) {
       box.webkitRequestFullscreen();
     } else if (v.webkitEnterFullscreen) {
-      v.webkitEnterFullscreen();
+      try { v.webkitEnterFullscreen(); state.iosFs = !!v.webkitDisplayingFullscreen; } catch (e) {}
     } else {
       toast('当前浏览器不支持全屏');
     }
@@ -2068,6 +2073,9 @@
     document.addEventListener('keydown', onPlayerKey);
     document.addEventListener('fullscreenchange', syncFullBtn);
     document.addEventListener('webkitfullscreenchange', syncFullBtn);
+    // iOS 原生视频全屏没有 fullscreenchange，只能靠这组 webkit 事件同步按钮与 state
+    v.addEventListener('webkitbeginfullscreen', function () { state.iosFs = true; syncFullBtn(); });
+    v.addEventListener('webkitendfullscreen', function () { state.iosFs = false; syncFullBtn(); });
   }
 
   function onPlayerKey(e) {
@@ -2182,7 +2190,10 @@
   }
 
   function closePlayer() {
+    // 先退全屏：全屏元素留在 top layer 时只隐藏 .player，会留下一块不可交互的黑屏。
+    if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
     var v = $('video');
+    if (v.webkitDisplayingFullscreen && v.webkitExitFullscreen) { try { v.webkitExitFullscreen(); } catch (e) {} }
     // 关掉播放器后，仍在路上的 /api/play 响应不应再把播放器打开。
     playSeq++;
     closeQualityMenu();

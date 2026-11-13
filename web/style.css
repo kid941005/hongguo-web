@@ -259,9 +259,14 @@ input:focus,textarea:focus,.select:focus{border-color:var(--brand)}
 .phint{font-size:11.5px;color:var(--muted);padding:8px 2px 0;line-height:1.6;text-align:center}
 .player-error{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--perr-line);background:var(--perr-bg);border-radius:10px;color:var(--perr-text);font-size:13px}
 .player-error span{flex:1;min-width:0}
-.player-inner:fullscreen{background:#000;display:flex;flex-direction:column;justify-content:center;padding:0}
-.player-inner:fullscreen video{max-height:calc(100vh - 120px)}
-.player-inner:fullscreen .player-bar,.player-inner:fullscreen .phint{padding-left:16px;padding-right:16px}
+.player-inner:fullscreen{position:relative;width:100%;height:100%;max-height:none;gap:0;padding:0;background:#000;justify-content:center}
+/* 注意：这里必须用 .player-inner:fullscreen #video（特异性 1,2,0），否则会被 #video{max-height:78vh/60vh}（1,0,0）压掉，
+   全屏时视频只能占 60%~78% 高度，上下留大黑边。height:100% 同时避开 100vh 在移动端地址栏收放时的抖动。 */
+.player-inner:fullscreen #video{width:100%;height:100%;max-height:none;min-height:0;flex:1 1 auto;border-radius:0;object-fit:contain;background:#000}
+/* 全屏时整条顶栏隐藏，只留视频画面（顶栏一旦浮在画面上就会和系统状态栏/时间叠在一起）。
+   退出全屏仍可用：双击画面（web/app.js:2067）、Esc、F 键、以及 video 原生控制条的全屏按钮。 */
+.player-inner:fullscreen .player-bar{display:none}
+.player-inner:fullscreen .phint{display:none}
 @media (max-width:640px){ .pactions{gap:6px} #btnRate,#btnQuality{min-width:56px} .phint{display:none} }
 
 /* 账号 / 收藏 / 追剧 */
