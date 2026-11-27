@@ -439,7 +439,7 @@ export function createServer({ provider, sources, catalog, users = null, monitor
     }],
 
     // ---- 内置红果：服务端解密流 ----
-    ["GET", /^\/api\/stream\/(\d{1,30})$/, async ({ req, res, params, q }) => {
+    ["GET", /^\/api\/stream\/(\d{1,30}|v1_[A-Za-z0-9_-]{20,40})$/, async ({ req, res, params, q }) => {
       return serveStream(req, res, params[0], q.get("q") || "auto", q.get("vvc") === "1");
     }],
 

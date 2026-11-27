@@ -38,6 +38,7 @@ const VENDOR_EXPORTS = [
   "itemToCard",
   "appSearchPage",
   "appSeriesSeasons",
+  "appSeriesDetail",
   "APP_DEVICE",
   "websiteSearch",
   "routerData",
@@ -207,6 +208,41 @@ async function seriesSeasons(rawId) {
   return task;
 }
 
+// ---- App 完整分集列表（官网匿名态只公开前 5 集后，改读 App 签名 video_detail） ----
+// 官网 /detail 的 vid_list 2026-11 起只剩 accessible_episode_cnt 条（实测 5 条）且 ID 是不透明的
+// v1_ 字符串；App 的 /novel/player/video_detail/v1/ 仍返回完整分集（纯数字 vid），
+// 因此详情以 App 通道优先，官网仅作兜底。设备身份与 App 搜索/季表共用，空正文时轮换一次。
+const APP_DETAIL_EMPTY = /App detail failed: 200\b/;
+const DETAIL_TTL = 10 * 60 * 1000;
+const detailCache = new Map();
+const detailPending = new Map();
+async function appSeriesDetail(rawId) {
+  const id = String(rawId == null ? "" : rawId).replace(/^hongguo:/, "");
+  if (!/^[1-9]\d{9,29}$/.test(id)) throw fail("BAD_INPUT", "剧集 id 无效");
+  const cached = detailCache.get(id);
+  if (cached && Date.now() - cached.at < DETAIL_TTL) return cached.value;
+  if (detailPending.has(id)) return detailPending.get(id);
+  const task = (async () => {
+    useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+    const identity = () => ({ ...api.APP_DEVICE, cdid: crypto.randomUUID() });
+    let value;
+    try {
+      value = await api.appSeriesDetail(id, identity());
+    } catch (error) {
+      if (!APP_DETAIL_EMPTY.test(String((error && error.message) || ""))) throw error;
+      const result = await devices.rotate("detail-risk");
+      if (result.rotated && result.identity) useAppIdentity(result.identity);
+      else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+      value = await api.appSeriesDetail(id, identity());
+    }
+    detailCache.set(id, { at: Date.now(), value });
+    while (detailCache.size > 200) detailCache.delete(detailCache.keys().next().value);
+    return value;
+  })().finally(() => detailPending.delete(id));
+  detailPending.set(id, task);
+  return task;
+}
+
 const SITE = "https://hongguoduanju.com";
 const card = (row) => ({
   id: String(row.url),
@@ -373,19 +409,46 @@ export const provider = {
   seriesSeasons,
 
   async detail(id) {
+    // App 通道优先：完整分集、纯数字 vid（可直接被官方播放通道使用）。
+    let appDetail = null;
+    let appError = null;
+    try {
+      appDetail = await appSeriesDetail(String(id));
+    } catch (error) {
+      appError = error;
+    }
+    if (appDetail && Array.isArray(appDetail.episodes) && appDetail.episodes.length) {
+      const episodes = appDetail.episodes.map((ep, index) => ({
+        id: String(ep.id),
+        title: ep.title || `第 ${index + 1} 集`,
+        number: Number(ep.number) || index + 1,
+      }));
+      if (episodes.some((e) => !e.id) || new Set(episodes.map((e) => e.id)).size !== episodes.length)
+        throw new Error("分集数据异常");
+      const total = Number(appDetail.episode_count) || episodes.length;
+      return {
+        id: String(id),
+        title: appDetail.title || "",
+        cover: appDetail.cover || "",
+        description: appDetail.description || "",
+        badge: total ? `全${total}集` : "",
+        tags: "",
+        episodes,
+      };
+    }
+    // 官网兜底：匿名态通常只有前 5 集，且 id 为不透明的 v1_ 字符串。
     const data = await api.routerData(`${SITE}/detail?series_id=${id}`);
     const series = data?.loaderData?.detail_page?.seriesDetail;
-    if (!series || !Array.isArray(series.vid_list) || !series.vid_list.length)
+    if (!series || !Array.isArray(series.vid_list) || !series.vid_list.length) {
+      if (appError) throw new Error(`分集数据异常：${String((appError && appError.message) || appError)}`);
       throw new Error("剧集不存在或分集暂不可用");
+    }
     const episodes = Array.from(series.vid_list, (vid, index) => ({
       id: String(vid),
       title: `第 ${index + 1} 集`,
       number: index + 1,
     }));
-    if (
-      episodes.some((e) => !/^\d+$/.test(e.id)) ||
-      new Set(episodes.map((e) => e.id)).size !== episodes.length
-    )
+    if (episodes.some((e) => !e.id) || new Set(episodes.map((e) => e.id)).size !== episodes.length)
       throw new Error("分集数据异常");
     return { ...card(api.itemToCard(series)), id, episodes };
   },

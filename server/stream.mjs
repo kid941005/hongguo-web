@@ -79,7 +79,7 @@ export function createStreamHandler({ provider, limit = 6 }) {
     const wanted = String(quality || "auto").toLowerCase();
     if (!QUALITIES.has(wanted)) throw fail("BAD_INPUT", "清晰度参数无效");
     if (!["GET", "HEAD"].includes(req.method)) throw fail("BAD_METHOD", "只支持 GET / HEAD");
-    if (!/^[1-9]\d{0,29}$/.test(epId)) throw fail("BAD_INPUT", "剧集 id 无效");
+    if (!/^(?:[1-9]\d{0,29}|v1_[A-Za-z0-9_-]{20,40})$/.test(epId)) throw fail("BAD_INPUT", "剧集 id 无效");
 
     // HEAD 只回元数据：不去解析播放地址（要打上游取址接口）、不占用播放槽位。
     // 旧实现 HEAD 也会跑一遍 provider.stream，等于探活就触发一次上游风控。

@@ -98,3 +98,88 @@ async function appSeriesSeasons(rawId) {
     }
     return { list: [...rows.values()].sort((a, b) => a.season - b.season) };
 }
+
+
+// ===== 本地补丁：App 端完整分集列表（video_detail/v1） =====
+// 2026-11 起官网详情页对匿名访客只公开前 5 集，且分集 ID 换成不透明的 v1_ 字符串；
+// 继续读官网 vid_list 会让所有剧详情报「分集数据异常」。App 的签名接口
+// /novel/player/video_detail/v1/ 仍返回完整分集（纯数字 vid），这里复刻上游 openhongguo
+// 的实现：注册匿名设备身份 → 签名 POST → 解析 data.video_data。
+// 只读接口，不涉及解密；播放仍走既有 official / web 通道。
+const HG_VIDEO_DETAIL_API = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/video_detail/v1/';
+const HG_VIDEO_DETAIL_BIZ = {
+    caller_scene: 'single_col', detail_page_version: 0, from_video_id: '',
+    need_all_video_definition: false, need_mp4_align: false, source: 4, video_id_type: 1,
+};
+
+async function hgSignedPost(apiUrl, values, bodyText) {
+    const khronos = Math.floor(Date.now() / 1000);
+    const ticket = Date.now();
+    const query = pythonUrlEncode({ ...values, ts: String(khronos), _rticket: String(ticket) });
+    const url = apiUrl + '?' + query;
+    const random = Math.floor(Math.random() * 65536);
+    const bodyBuf = Buffer.from(bodyText);
+    const headers = {
+        'User-Agent': APP_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf',
+        'x-ss-req-ticket': String(ticket), 'x-tt-request-tag': 't=0;n=0', 'sdk-version': '2',
+        'passport-sdk-version': '50561', 'x-xs-from-web': '0', 'x-khronos': String(khronos),
+        'x-ladon': be32(khronos).toString('base64'), 'x-argus': le32(khronos).toString('base64'),
+        'x-gorgon': xGorgon(query, bodyBuf, khronos, random), 'x-helios': helios(khronos),
+        'x-medusa': buildMedusa(url, bodyBuf, khronos), 'x-tt-dt': '',
+        'Content-Type': 'application/json; charset=UTF-8',
+        'x-ss-stub': crypto.createHash('md5').update(bodyBuf).digest('hex').toUpperCase(),
+    };
+    const resp = await axios.post(url, bodyText, { headers, timeout: 20000, responseType: 'text', transformResponse: [(value) => value] });
+    const text = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    let data = null;
+    try { data = JSON.parse(text); } catch { data = null; }
+    // 空正文 = 身份被风控（与 App 搜索同判据），交给 provider 换身份重试。
+    if (resp.status !== 200 || !data) throw new Error('App detail failed: ' + resp.status);
+    return data;
+}
+
+// 返回 { series_id, title, cover, description, episode_count, pay_type, episodes:[{id,title,number,duration}] }。
+async function appSeriesDetail(rawId, identityOverride) {
+    const id = str(rawId).replace(/^hongguo:/, '');
+    if (!/^[1-9]\d{9,29}$/.test(id)) throw new Error('INVALID_SERIES_ID');
+    const identity = identityOverride || await playbackIdentity();
+    const device = {
+        ...APP_DEVICE, ...identity,
+        cdid: identity.cdid || crypto.randomUUID(),
+        version_code: '73932', version_name: '7.3.9.32',
+        manifest_version_code: '73932', update_version_code: '73932', pv_player: '73932',
+    };
+    const data = await hgSignedPost(HG_VIDEO_DETAIL_API, device, JSON.stringify({ series_id: id, biz_param: HG_VIDEO_DETAIL_BIZ }));
+    if (Number(data.code) !== 0) throw new Error('DETAIL_REJECTED: ' + (data.message || data.code));
+    const videoData = data && data.data && data.data.video_data;
+    const rows = Array.isArray(videoData && videoData.video_list) ? videoData.video_list : [];
+    const firstCover = cleanUrl(str(rows[0] && (rows[0].cover || rows[0].episode_cover)));
+    const seriesCover = cleanUrl(str(videoData.series_cover));
+    // App 的 series_cover 常是 HEIC（Chrome 不渲染），此时用首集封面兜底。
+    const cover = /^https?:\/\//i.test(seriesCover) && !/\.heic(?:\?|$)/i.test(seriesCover) ? seriesCover : firstCover;
+    const seen = new Set();
+    const episodes = [];
+    for (const video of rows) {
+        const raw = video && (video.vid || video.vid_str);
+        const vid = typeof raw === 'string' ? raw.trim() : Number.isSafeInteger(raw) ? String(raw) : '';
+        if (!/^[1-9]\d{9,29}$/.test(vid) || seen.has(vid)) continue;
+        seen.add(vid);
+        const number = hgPositiveInt(video.vid_index) || episodes.length + 1;
+        episodes.push({
+            id: vid,
+            title: '第 ' + number + ' 集',
+            number,
+            duration: hgPositiveInt(video.duration),
+        });
+    }
+    if (!videoData || !episodes.length) throw new Error('DETAIL_EMPTY');
+    return {
+        series_id: str(videoData.series_id_str || videoData.series_id || id),
+        title: str(videoData.series_title),
+        cover,
+        description: str(videoData.series_intro),
+        episode_count: hgPositiveInt(videoData.episode_cnt) || episodes.length,
+        pay_type: videoData.pay_info ? hgPositiveInt(videoData.pay_info.pay_type) : 0,
+        episodes,
+    };
+}

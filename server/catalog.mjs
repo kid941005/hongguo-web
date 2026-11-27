@@ -639,7 +639,7 @@ export function createCatalog({ provider, sources }) {
     const entry = entryOf(sourceId);
     if (!id) throw fail("BAD_INPUT", "缺少剧集 id");
     if (entry.type === "builtin") {
-      if (!/^\d{1,30}$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
+      if (!/^(?:\d{1,30}|v1_[A-Za-z0-9_-]{20,40})$/.test(String(id))) throw fail("BAD_INPUT", "剧集 id 无效");
       // 官方接口能取到真实多档（360P–1080P，全部 HEVC + CENC），服务端解密后按 Range 转发。
       // 菜单要如实反映可用档位：查不到档位时只列 360P 兼容档，不伪造点不开的高清项。
       // 档位信息只用于渲染菜单：它失败（超时/上游抖动/熔断）不能连累取流地址，否则本来能播的剧也 502。

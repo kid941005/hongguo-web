@@ -83,6 +83,7 @@ const EXPECTED_EXPORTS = [
   "itemToCard",
   "appSearchPage",
   "appSeriesSeasons",
+  "appSeriesDetail",
   "APP_DEVICE",
   "websiteSearch",
   "routerData",
