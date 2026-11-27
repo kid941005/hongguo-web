@@ -226,14 +226,19 @@ async function appSeriesDetail(rawId) {
     useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
     const identity = () => ({ ...api.APP_DEVICE, cdid: crypto.randomUUID() });
     let value;
-    try {
-      value = await api.appSeriesDetail(id, identity());
-    } catch (error) {
-      if (!APP_DETAIL_EMPTY.test(String((error && error.message) || ""))) throw error;
-      const result = await devices.rotate("detail-risk");
-      if (result.rotated && result.identity) useAppIdentity(result.identity);
-      else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
-      value = await api.appSeriesDetail(id, identity());
+    // 刚注册/轮换的匿名身份偶尔仍被视频接口判为空正文，等一小会儿再换身份重试；
+    // 直接回落官网会只剩前几集，所以这里多给最多 3 次机会（退避 250ms / 600ms）。
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        value = await api.appSeriesDetail(id, identity());
+        break;
+      } catch (error) {
+        if (!APP_DETAIL_EMPTY.test(String((error && error.message) || "")) || attempt >= 2) throw error;
+        const result = await devices.rotate("detail-risk");
+        if (result.rotated && result.identity) useAppIdentity(result.identity);
+        else useAppIdentity(await devices.get({ maxAgeMs: APP_IDENTITY_MAX_AGE }));
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 250 : 600));
+      }
     }
     detailCache.set(id, { at: Date.now(), value });
     while (detailCache.size > 200) detailCache.delete(detailCache.keys().next().value);

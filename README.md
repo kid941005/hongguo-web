@@ -199,7 +199,7 @@ docker run -d --name hongguo-web \
 
 不用 compose 时换端口：把 `-p 8787:8787` 和 `-e PORT=8787` 一起改成同一个端口即可。
 
-想固定版本就把镜像换成 `ghcr.io/kid941005/hongguo-web:0.14.22`（Docker Hub 上同名：`docker.io/kid941005/hongguo-web:0.14.22`）。
+想固定版本就把镜像换成 `ghcr.io/kid941005/hongguo-web:0.14.23`（Docker Hub 上同名：`docker.io/kid941005/hongguo-web:0.14.23`）。
 
 ### 镜像与标签
 
@@ -235,7 +235,7 @@ docker run -d --name hongguo-web \
 | 关闭官方 SDK 取址 | environment.HONGGUO_SDK_PLAYBACK: `"0"`（不启用 Python SDK 通道，仅走旧接口与 360P 兼容通道） |
 | 允许代理内网媒体 | environment.ALLOW_PRIVATE_MEDIA: `"1"`（默认拒绝，防 SSRF） |
 | 改时区 | environment.TZ: `"Asia/Shanghai"` |
-| 固定版本 | image 改成 `ghcr.io/kid941005/hongguo-web:0.14.22`，或 Docker Hub 的 `docker.io/kid941005/hongguo-web:0.14.22` |
+| 固定版本 | image 改成 `ghcr.io/kid941005/hongguo-web:0.14.23`，或 Docker Hub 的 `docker.io/kid941005/hongguo-web:0.14.23` |
 
 ### 基础
 
@@ -559,6 +559,7 @@ hongguo-web/
 ## 版本说明
 
 最新发布见 [Releases](https://github.com/kid941005/hongguo-web/releases)。main 对应 `:edge`；正式版本打 v* 标签并同时推 `:版本号` 与 `:latest`。
+- **v0.14.23**：完善 v0.14.22 的首次加载。刚注册 / 轮换的匿名设备身份偶尔仍被 App 视频接口返回 200 空正文，导致第一次打开详情回落到官网兜底（只剩前几集）；现在空正文时最多换身份重试 3 次（退避 250ms / 600ms），首次打开也能拿到完整分集。
 - **v0.14.22**：修复「红果播放通道不可用：分集数据异常」。2026-11 起官网详情页对匿名访客只返回前 5 集，且分集 ID 从纯数字换成不透明的 `v1_...` 字符串；旧校验一律判为「分集数据异常」，所有红果剧详情 502。本版改为**App 签名分集接口优先**（`/novel/player/video_detail/v1/`，复用匿名设备身份与签名链，空正文自动换身份重试一次），拿到完整分集（实测 96/78 集）与纯数字 vid；官网 5 集仅作兜底，并放开 `v1_` ID 的详情解析与 `/api/stream` 直链播放。实测《少夫人来自东北3》第 1/96 集均为 1080P 起播、Range 206，桌面与移动端回归通过。
 - **v0.14.21**：修复官方高清取流。上游把 App 取址接口（video_tab / multi_video_model）对匿名设备一律返回 HTTP 200 空正文，导致官方通道熔断、整站回落到 360P 兼容通道。本版新增**官方 SDK v5 取址通道**：匿名设备注册 → 下载并校验官方 SDK 素材（首次约 5.4MB，缓存到 `DATA_DIR/sdk-cache`）→ 本地模拟 SDK 计算签名 → 换取 token → 调播放接口拿 1080P/720P 的 HEVC 流与内容密钥，再由现有解密/转码链路输出。实测 1080P/720P/540P/480P/360P 全部恢复；首次播放需下载素材，起播约 6–8 秒，之后每集起播约 3–4 秒。可用 `HONGGUO_SDK_PLAYBACK=0` 关闭。 本机 8787 容器已升级到该版本（`docker compose up -d` 后 `/health` 报 `0.14.21`，桌面与移动端播放回归 28/28 通过）。
 - **v0.14.20**：数据目录改为本地 bind 挂载。默认 compose 的 `volumes` 从命名卷 `hongguo-data:/app/data` 改为 `./hongguo-data:/app/data`，账号库/历史/收藏/导入的源直接落在宿主机当前目录，方便查看与备份（README 升级章节已附旧卷迁移命令）；`compose.host.yaml` 同步改为 `./hongguo-data:/app/data`。 本机 8787 容器已升级到该版本（数据已从旧命名卷 `app_hongguo-data` 迁移到 `app/hongguo-data`，`/health` 报 `0.14.20`，状态 healthy）。
