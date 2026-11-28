@@ -2733,6 +2733,9 @@
   // 只在「已经接近片尾」时预取：元数据刚就绪时离片尾往往还有整集，提前拉纯属浪费带宽。
   function maybePrefetchNext(v) {
     if (!v || !isFinite(v.duration) || v.duration <= 0) return;
+    // 起播/续播刚开始时 currentTime 还在 0 附近：此时 duration 可能只是转码清单的「已生成部分」
+    // （红果 HLS 一开始只报十几秒），不能把它误当成「这一集只剩十几秒」而立刻预取下一集。
+    if ((v.currentTime || 0) < 5) return;
     if (v.duration - (v.currentTime || 0) > NEXT_PREFETCH_AHEAD) return;
     prefetchNext();
   }
