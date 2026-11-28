@@ -199,7 +199,7 @@ docker run -d --name hongguo-web \
 
 不用 compose 时换端口：把 `-p 8787:8787` 和 `-e PORT=8787` 一起改成同一个端口即可。
 
-想固定版本就把镜像换成 `ghcr.io/kid941005/hongguo-web:0.14.23`（Docker Hub 上同名：`docker.io/kid941005/hongguo-web:0.14.23`）。
+想固定版本就把镜像换成 `ghcr.io/kid941005/hongguo-web:0.14.24`（Docker Hub 上同名：`docker.io/kid941005/hongguo-web:0.14.24`）。
 
 ### 镜像与标签
 
@@ -235,7 +235,7 @@ docker run -d --name hongguo-web \
 | 关闭官方 SDK 取址 | environment.HONGGUO_SDK_PLAYBACK: `"0"`（不启用 Python SDK 通道，仅走旧接口与 360P 兼容通道） |
 | 允许代理内网媒体 | environment.ALLOW_PRIVATE_MEDIA: `"1"`（默认拒绝，防 SSRF） |
 | 改时区 | environment.TZ: `"Asia/Shanghai"` |
-| 固定版本 | image 改成 `ghcr.io/kid941005/hongguo-web:0.14.23`，或 Docker Hub 的 `docker.io/kid941005/hongguo-web:0.14.23` |
+| 固定版本 | image 改成 `ghcr.io/kid941005/hongguo-web:0.14.24`，或 Docker Hub 的 `docker.io/kid941005/hongguo-web:0.14.24` |
 
 ### 基础
 
@@ -557,6 +557,8 @@ hongguo-web/
 - **源自动更新**：只对 HTTPS 上游的用户 JS 源生效；内置源随镜像升级，不参与自动更新。
 
 ## 版本说明
+
+- **v0.14.24**：新增「下一集预取」。播放到距片尾 20 秒时，提前请求下一集的 `/api/play` 并缓存完整响应；直链 mp4 用隐藏 video 预拉首帧，HLS 会逐层解析「主清单 → 子清单 → 首个分片」预热（顺带触发服务端提前转码），切集时直接复用，不再等「上游取址 + 首块解密」。实测切集耗时 xifan 564→447ms、qimao 307→252ms，自动连播同样命中缓存、不再重复取址；关闭播放器/换源会中止预取，最多缓存 6 条、5 分钟后过期。
 
 最新发布见 [Releases](https://github.com/kid941005/hongguo-web/releases)。main 对应 `:edge`；正式版本打 v* 标签并同时推 `:版本号` 与 `:latest`。
 - **v0.14.23**：完善 v0.14.22 的首次加载。刚注册 / 轮换的匿名设备身份偶尔仍被 App 视频接口返回 200 空正文，导致第一次打开详情回落到官网兜底（只剩前几集）；现在空正文时最多换身份重试 3 次（退避 250ms / 600ms），首次打开也能拿到完整分集。

@@ -1510,9 +1510,12 @@
       dur: (histGet(state.viewSource, d.id) || {}).dur || 0
     });
     updateResumeBar(d);
-    if (!autoNext) toast('正在解析播放地址…');
+    // 预取命中：同一集刚在临近片尾时抓过 /api/play，直接复用响应，省掉一次取址往返。
+    var playKey = episodePlayKey(lineIdx, epIdx);
+    var prefetched = readPrefetchedPlay(playKey);
+    if (!autoNext && !prefetched) toast('正在解析播放地址…');
     var mySeq = ++playSeq;
-    api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id }).then(function (r) {
+    (prefetched ? Promise.resolve(prefetched) : api('/api/play', { source: state.viewSource, flag: line.flag, id: ep.id })).then(function (r) {
       // 过期响应（用户又点了别的集/关了播放器）直接丢弃，避免「点 A 播 B」。
       if (mySeq !== playSeq || state.detail !== d) return;
       openPlayer(r.url, r.type, startAt, autoNext, r.quality);
@@ -2548,7 +2551,9 @@
       state.pendingSeek = 0;
       state.silentSeek = false;
       if (state.switching) { state.switching = false; updateQualityBtn(); }
-      prefetchNext();
+      // 不在元数据就绪时立刻预取整集（离片尾还早，白占带宽）；续播点已经临近片尾时才提前预取，
+      // 正常播放由 timeupdate 的临近片尾分支触发。
+      maybePrefetchNext(v);
       clearDiag();
       armStallCheck(v, 1200);
     });
@@ -2579,6 +2584,8 @@
       // 等清单 ENDLIST（hlsLive=false）后再判断，否则会在第 3–4 秒就把没播完的一集跳过。
       if (state.hlsMode && state.hlsLive) return;
       if (v.currentTime < 5) return;   // 极短窗口（清单刚就绪）不参与片尾判定
+      // 临近片尾提前抓下一集的分集直链：切集时直接复用，避免「切了再等取址」的卡顿。
+      if (v.duration - v.currentTime <= NEXT_PREFETCH_AHEAD) prefetchNext();
       if (v.currentTime > 0 && v.duration - v.currentTime <= 0.6) scheduleAutoNext();
     });
     v.addEventListener('pause', function () { saveProgress(v); });
@@ -2698,67 +2705,139 @@
     try { return new URLSearchParams(location.search).get('quality') || ''; } catch (e) { return ''; }
   }
 
-  // ---- 下一集预取 ----
-  // 省掉换集时「上游取址 + 首块解密」的等待（红果那条链通常 300~800ms）。
-  // 边界：只预热到首帧就断开下载，不偷偷吃掉整集流量；最多记 6 条已预热，超出淘汰最旧。
+  // ---- 下一集预取（临近片尾提前加载） ----
+  // 目标：播放到距片尾 NEXT_PREFETCH_AHEAD 秒时，提前把下一集的 /api/play（分集直链）抓回来并缓存；
+  // 切集时 playEpisode 直接复用这份响应，省掉「上游取址 + 首块解密」那 300~800ms。
+  // - 直链 mp4：用隐藏 <video> 预拉首帧，让服务端先完成取址/首块解密；
+  // - HLS（含红果转码档）：先 fetch 清单（会启动服务端转码任务），再拉首个分片预热；
+  // - 缓存带 TTL，最多记 6 条；关闭播放器/换源时中止正在预热的请求。
   var PREFETCH_MAX = 6;
+  var PREFETCH_TTL = 5 * 60 * 1000;   // 预取结果 5 分钟内有效（上游直链带签名，不能长期复用）
+  var NEXT_PREFETCH_AHEAD = 20;       // 距片尾 20 秒开始预取（每次 timeupdate 判断，缓存/占位去重）
   var prefetchCache = new Map();
   var prefetchEl = null;
   var prefetchKey = '';
+  var prefetchAbort = null;
+
+  // 缓存键含「源 + 剧 + 线路 + 集序号」，换源/换剧/换线路都不会误命中。
+  function episodePlayKey(lineIdx, epIdx) {
+    var id = state.detail ? String(state.detail.id || '') : '';
+    return state.viewSource + '|' + id + '|' + lineIdx + '|' + epIdx;
+  }
+  // playEpisode 命中预取时直接拿完整 /api/play 响应；过期则回落到正常请求。
+  function readPrefetchedPlay(key) {
+    var hit = prefetchCache.get(key);
+    if (hit && hit.play && (Date.now() - hit.at) < PREFETCH_TTL) return hit.play;
+    return null;
+  }
+  // 只在「已经接近片尾」时预取：元数据刚就绪时离片尾往往还有整集，提前拉纯属浪费带宽。
+  function maybePrefetchNext(v) {
+    if (!v || !isFinite(v.duration) || v.duration <= 0) return;
+    if (v.duration - (v.currentTime || 0) > NEXT_PREFETCH_AHEAD) return;
+    prefetchNext();
+  }
+  // 预取要挑「下一集真正会播的那一档」：默认 auto 可能是 HEVC/VVC，不支持 HEVC 的机子预热了也白费。
+  function prefetchUrlFor(r) {
+    if (!r || !r.url) return '';
+    var opts = r.quality && Array.isArray(r.quality.options) ? r.quality.options : [];
+    if (!opts.length) return r.url;
+    var pick = null;
+    if (state.qualityKey) pick = opts.filter(function (o) { return o.key === state.qualityKey; })[0] || null;
+    if (!pick && !hevcSupported()) pick = opts.filter(function (o) { return o.codec === 'h264'; })[0] || null;
+    if (!pick) pick = opts.filter(function (o) { return o.key === 'auto'; })[0] || opts[0];
+    return (pick && pick.url) ? pick.url : r.url;
+  }
+  function warmPrefetchUrl(url, type, key) {
+    if (!url) return;
+    var u = authUrl(url);
+    if (!u) return;
+    var isHls = type === 'hls' || /\.m3u8(\?|$)/i.test(String(url));
+    if (isHls) {
+      if (prefetchAbort) { try { prefetchAbort.abort(); } catch (e) {} }
+      var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+      prefetchAbort = ctrl;
+      // 清单可能是「主清单 → 子清单 → 分片」两级，逐层解析，最多下探两层，
+      // 直到拿到真正的分片再按 Range 拉首段（只拿首段，不整集偷流量）。
+      function resolveHlsUrl(raw, base) {
+        try {
+          if (/^https?:/i.test(raw)) return raw;
+          return new URL(raw, base || location.href).href;
+        } catch (e) { return ''; }
+      }
+      function warmHls(manifestUrl, depth) {
+        if (!manifestUrl || depth > 2) return Promise.resolve(null);
+        var target = authUrl(manifestUrl);
+        return fetch(target, { cache: 'no-store', headers: { Accept: 'application/vnd.apple.mpegurl' }, signal: ctrl ? ctrl.signal : undefined })
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.text();
+          })
+          .then(function (text) {
+            var firstSeg = '';
+            String(text).split(/\r?\n/).some(function (line) {
+              var s = line.trim();
+              if (!s || s.charAt(0) === '#') return false;
+              firstSeg = s;
+              return true;
+            });
+            if (!firstSeg) return null;
+            var nextUrl = resolveHlsUrl(firstSeg, manifestUrl);
+            if (!nextUrl) return null;
+            // 子清单继续下探；分片才真正预拉首段。
+            var isManifest = /\.m3u8(\?|$)/i.test(firstSeg) || /\/api\/(?:hls|tc)\b/i.test(firstSeg);
+            if (isManifest) return depth < 2 ? warmHls(nextUrl, depth + 1) : null;
+            return fetch(authUrl(nextUrl), { cache: 'no-store', headers: { Range: 'bytes=0-262143' }, signal: ctrl ? ctrl.signal : undefined })
+              .then(function (x) { return x.arrayBuffer(); });
+          });
+      }
+      warmHls(u, 0)
+        .catch(function () {
+          // 预热失败不影响正常播放：真正切集时还会按正常链路重取。
+        })
+        .then(function () { if (prefetchAbort === ctrl) prefetchAbort = null; });
+      return;
+    }
+    // 直链 mp4：隐藏 <video> 只拉首帧，不偷偷吃掉整集流量。
+    if (prefetchEl) {
+      try { prefetchEl.removeAttribute('src'); prefetchEl.load(); if (prefetchEl.parentNode) prefetchEl.parentNode.removeChild(prefetchEl); } catch (e) {}
+      prefetchEl = null;
+    }
+    var el = document.createElement('video');
+    el.preload = 'auto';
+    el.muted = true;
+    el.playsInline = true;
+    el.setAttribute('aria-hidden', 'true');
+    el.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+    el.addEventListener('loadeddata', function () {
+      try { el.removeAttribute('src'); el.load(); if (el.parentNode) el.parentNode.removeChild(el); } catch (e) {}
+      if (prefetchEl === el) prefetchEl = null;
+    }, { once: true });
+    prefetchEl = el;
+    document.body.appendChild(el);
+    el.src = u;
+  }
 
   function prefetchNext() {
     if ($('player').classList.contains('hidden')) return;
     var d = state.detail; if (!d) return;
     var line = d.lines[state.line]; if (!line) return;
-    var next = line.episodes[(state.epIdx || 0) + 1]; if (!next) return;
+    var nextIdx = (state.epIdx || 0) + 1;
+    var next = line.episodes[nextIdx]; if (!next) return;
     // 用户开了省流量模式就别预取。
     if (navigator.connection && navigator.connection.saveData) return;
-    var key = state.viewSource + '|' + d.id + '|' + state.line + '|' + ((state.epIdx || 0) + 1);
-    // 缓存项带 url：命中前校验确实是这一路的地址，避免旧记录挡住真正需要的预取。
+    var key = episodePlayKey(state.line, nextIdx);
     var cached = prefetchCache.get(key);
-    if ((cached && cached.url) || prefetchKey === key) return;
+    if (cached && cached.play && (Date.now() - cached.at) < PREFETCH_TTL) return;
+    if (prefetchKey === key) return;
     prefetchKey = key;
     api('/api/play', { source: state.viewSource, flag: line.flag, id: next.id }).then(function (r) {
-      // 取址失败要回滚占位 key，否则这一集之后永远被 prefetchKey === key 拦住，再也预取不到。
       if (!r || !r.url) { if (prefetchKey === key) prefetchKey = ''; return; }
-      // HLS 要 hls.js 解析清单才有意义，这里只预热直链（红果/西饭/牛牛这类 mp4）。
-      if (r.type === 'hls') { prefetchCache.set(key, { at: Date.now(), url: r.url }); if (prefetchKey === key) prefetchKey = ''; trimPrefetch(); return; }
-      // 预取要用「下一集真正会播的那一档」：默认 auto 是 HEVC，不支持 HEVC 的浏览器预热了也播不了。
-      var purl = r.url;
-      if (r.quality && Array.isArray(r.quality.options) && r.quality.options.length) {
-        var pick = null;
-        if (state.qualityKey) {
-          pick = r.quality.options.filter(function (o) { return o.key === state.qualityKey; })[0] || null;
-        }
-        if (!pick && !hevcSupported()) {
-          pick = r.quality.options.filter(function (o) { return o.codec === 'h264'; })[0] || null;
-        }
-        if (pick && pick.url) purl = pick.url;
-      }
-      // 转码档是 HLS 清单：<video> 预取不认 m3u8，预热没意义，直接记成已处理。
-      if (/\.m3u8(\?|$)/.test(String(purl))) { prefetchCache.set(key, { at: Date.now(), url: purl }); if (prefetchKey === key) prefetchKey = ''; trimPrefetch(); return; }
-      var playUrl = authUrl(purl);
-      // P2(W-07)：每次预取用独立的一次性监听，闭包捕获本次 key（原实现共用 _hgKey 会串键）。
-      if (prefetchEl) {
-        try { prefetchEl.removeAttribute('src'); prefetchEl.load(); if (prefetchEl.parentNode) prefetchEl.parentNode.removeChild(prefetchEl); } catch (e) {}
-        prefetchEl = null;
-      }
-      var el = document.createElement('video');
-      el.preload = 'auto';
-      el.muted = true;
-      el.playsInline = true;
-      el.setAttribute('aria-hidden', 'true');
-      el.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
-      el.addEventListener('loadeddata', function () {
-        try { el.removeAttribute('src'); el.load(); if (el.parentNode) el.parentNode.removeChild(el); } catch (e) {}
-        if (prefetchEl === el) prefetchEl = null;
-        prefetchCache.set(key, { at: Date.now(), url: playUrl });
-        if (prefetchKey === key) prefetchKey = '';
-        trimPrefetch();
-      }, { once: true });
-      prefetchEl = el;
-      document.body.appendChild(el);
-      el.src = playUrl;
+      // 先缓存完整响应：切集时 playEpisode 直接用它，连 /api/play 都不再打一次。
+      prefetchCache.set(key, { at: Date.now(), play: r, url: r.url });
+      trimPrefetch();
+      if (prefetchKey === key) prefetchKey = '';
+      // 再按实际会播的档位预拉首段：HLS 清单请求会让服务端提前开始转码。
+      warmPrefetchUrl(prefetchUrlFor(r), r.type, key);
     }).catch(function () { if (prefetchKey === key) prefetchKey = ''; });
   }
   function trimPrefetch() {
@@ -2766,11 +2845,11 @@
   }
   function stopPrefetch() {
     prefetchKey = '';
+    if (prefetchAbort) { try { prefetchAbort.abort(); } catch (e) {} prefetchAbort = null; }
     if (!prefetchEl) return;
     try { prefetchEl.removeAttribute('src'); prefetchEl.load(); if (prefetchEl.parentNode) prefetchEl.parentNode.removeChild(prefetchEl); } catch (e) {}
     prefetchEl = null;
   }
-
   function closePlayer() {
     // 先退全屏：全屏元素留在 top layer 时只隐藏 .player，会留下一块不可交互的黑屏。
     if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
@@ -3309,7 +3388,7 @@
       };
     },
     diagnose: { probe: probeStream, classify: classifyPlayback, report: diagnoseAndReport, arm: armStallCheck, clear: clearDiag },
-    prefetch: { cache: prefetchCache, el: function () { return prefetchEl; }, next: prefetchNext, trim: trimPrefetch }
+    prefetch: { cache: prefetchCache, el: function () { return prefetchEl; }, next: prefetchNext, trim: trimPrefetch, warm: warmPrefetchUrl, stop: stopPrefetch }
   };
   }
 
